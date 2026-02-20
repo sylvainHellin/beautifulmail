@@ -15,7 +15,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::App;
+use app::{Action, App, Mailbox};
 
 fn main() -> Result<()> {
     install_panic_hook();
@@ -41,9 +41,214 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             while let Some(m) = current_msg {
                 current_msg = app.update(m);
             }
+        } else {
+            // No event this tick -- count down status message
+            app.tick_status();
+        }
+
+        // Process pending action (side-effects outside the pure update)
+        if let Some(action) = app.pending_action.take() {
+            handle_action(&mut app, terminal, action)?;
         }
     }
 
+    Ok(())
+}
+
+fn handle_action(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    action: Action,
+) -> Result<()> {
+    match action {
+        Action::EditCurrent => {
+            if let Some(path) = app.selected_email_path() {
+                suspend_terminal(terminal)?;
+                let result = cli::edit_file(&path);
+                resume_terminal(terminal)?;
+                match result {
+                    Ok(()) => app.set_status("Returned from editor".to_string()),
+                    Err(e) => app.set_status(format!("Edit failed: {e}")),
+                }
+                app.reload_current_mailbox();
+            }
+        }
+
+        Action::Reply(reply_all) => {
+            if let Some(path) = app.selected_email_path() {
+                suspend_terminal(terminal)?;
+                let result = cli::reply(&path, reply_all);
+                resume_terminal(terminal)?;
+                match result {
+                    Ok(()) => {
+                        app.set_status("Reply draft created".to_string());
+                        // Invalidate drafts cache since a new draft was created
+                        app.invalidate_cache(Mailbox::Drafts);
+                    }
+                    Err(e) => app.set_status(format!("Reply failed: {e}")),
+                }
+                app.reload_current_mailbox();
+            }
+        }
+
+        Action::Send => {
+            if let Some(path) = app.selected_email_path() {
+                suspend_terminal(terminal)?;
+                let result = cli::send(&path);
+                resume_terminal(terminal)?;
+                match result {
+                    Ok(()) => {
+                        app.set_status("Email sent".to_string());
+                        app.invalidate_all_caches();
+                    }
+                    Err(e) => app.set_status(format!("Send failed: {e}")),
+                }
+                app.reload_current_mailbox();
+            }
+        }
+
+        Action::SendApproved => {
+            if let Some(dir) = &app.mailbox_dirs[app.active_mailbox.index()] {
+                let dir = dir.clone();
+                suspend_terminal(terminal)?;
+                let result = cli::send_approved(&dir);
+                resume_terminal(terminal)?;
+                match result {
+                    Ok(()) => {
+                        app.set_status("Approved emails sent".to_string());
+                        app.invalidate_all_caches();
+                    }
+                    Err(e) => app.set_status(format!("Send-approved failed: {e}")),
+                }
+                app.reload_current_mailbox();
+            }
+        }
+
+        Action::NewDraft => {
+            let name = chrono::Local::now().format("draft-%Y%m%d-%H%M%S").to_string();
+            match cli::new_draft(&name) {
+                Ok(msg) => {
+                    // Try to open the new draft in the editor
+                    if let Some(drafts_dir) = &app.mailbox_dirs[Mailbox::Drafts.index()] {
+                        let draft_path = drafts_dir.join(format!("{name}.md"));
+                        if draft_path.exists() {
+                            suspend_terminal(terminal)?;
+                            let _ = cli::edit_file(&draft_path);
+                            resume_terminal(terminal)?;
+                        }
+                    }
+                    app.set_status(msg);
+                    app.invalidate_cache(Mailbox::Drafts);
+                    app.reload_current_mailbox();
+                }
+                Err(e) => app.set_status(format!("New draft failed: {e}")),
+            }
+        }
+
+        Action::Approve => {
+            if let Some(path) = app.selected_email_path() {
+                match cli::approve(&path) {
+                    Ok(msg) => {
+                        app.set_status(msg);
+                        app.reload_current_mailbox();
+                    }
+                    Err(e) => app.set_status(format!("Approve failed: {e}")),
+                }
+            }
+        }
+
+        Action::Archive => {
+            if let Some(path) = app.selected_email_path() {
+                if let Some(archive_dir) = &app.mailbox_dirs[Mailbox::Archive.index()] {
+                    let archive_dir = archive_dir.clone();
+                    match cli::archive_file(&path, &archive_dir) {
+                        Ok(()) => {
+                            app.set_status("Email archived".to_string());
+                            app.invalidate_cache(Mailbox::Archive);
+                            app.reload_current_mailbox();
+                        }
+                        Err(e) => app.set_status(format!("Archive failed: {e}")),
+                    }
+                } else {
+                    app.set_status("No archive directory configured".to_string());
+                }
+            }
+        }
+
+        Action::Delete => {
+            if let Some(path) = app.selected_email_path() {
+                match cli::delete_file(&path) {
+                    Ok(()) => {
+                        app.set_status("Email deleted".to_string());
+                        app.reload_current_mailbox();
+                    }
+                    Err(e) => app.set_status(format!("Delete failed: {e}")),
+                }
+            }
+        }
+
+        Action::CopyPath => {
+            if let Some(path) = app.selected_email_path() {
+                match cli::copy_to_clipboard(&path.display().to_string()) {
+                    Ok(()) => app.set_status("Path copied to clipboard".to_string()),
+                    Err(e) => app.set_status(format!("Copy failed: {e}")),
+                }
+            }
+        }
+
+        Action::Fetch => {
+            app.set_status("Fetching...".to_string());
+            terminal.draw(|frame| ui::view(app, frame))?;
+
+            match cli::fetch() {
+                Ok(msg) => {
+                    app.set_status(if msg.is_empty() {
+                        "Fetch complete".to_string()
+                    } else {
+                        msg
+                    });
+                    app.invalidate_all_caches();
+                    app.reload_current_mailbox();
+                }
+                Err(e) => app.set_status(format!("Fetch failed: {e}")),
+            }
+        }
+
+        Action::Sync => {
+            app.set_status("Syncing...".to_string());
+            // Force a draw so the user sees the "Syncing..." message
+            terminal.draw(|frame| ui::view(app, frame))?;
+
+            match cli::sync() {
+                Ok(msg) => {
+                    app.set_status(if msg.is_empty() {
+                        "Sync complete".to_string()
+                    } else {
+                        msg
+                    });
+                    app.invalidate_all_caches();
+                    app.reload_current_mailbox();
+                }
+                Err(e) => app.set_status(format!("Sync failed: {e}")),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(stdout(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+fn resume_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen)?;
+    terminal.hide_cursor()?;
+    terminal.clear()?;
     Ok(())
 }
 
