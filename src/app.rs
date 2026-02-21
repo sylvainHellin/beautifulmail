@@ -10,6 +10,7 @@ pub enum Focus {
     Sidebar,
     List,
     Preview,
+    Search,
 }
 
 /// Messages that drive state transitions (TEA pattern).
@@ -145,6 +146,12 @@ pub struct App {
     pub status_message: Option<String>,
     /// Countdown ticks until status_message is cleared (~250ms per tick).
     pub status_ticks: u8,
+    /// Current search query text (empty = no filter active).
+    pub search_query: String,
+    /// Whether the current search also matches email body content (`\`).
+    pub search_includes_body: bool,
+    /// Whether the help overlay is displayed.
+    pub show_help: bool,
 }
 
 impl App {
@@ -179,6 +186,9 @@ impl App {
             confirm_dialog: None,
             status_message: None,
             status_ticks: 0,
+            search_query: String::new(),
+            search_includes_body: false,
+            show_help: false,
         }
     }
 
@@ -251,6 +261,8 @@ impl App {
     /// Load (or use cached) emails for a mailbox and set as active.
     fn switch_mailbox(&mut self, mailbox: Mailbox) {
         self.active_mailbox = mailbox;
+        self.search_query.clear();
+        self.search_includes_body = false;
         let idx = mailbox.index();
 
         if let Some(cached) = &self.email_cache[idx] {
@@ -275,9 +287,68 @@ impl App {
             return self.handle_confirm_key(key);
         }
 
+        // If help overlay is showing, handle it exclusively
+        if self.show_help {
+            return self.handle_help_key(key);
+        }
+
+        // If search bar is active, handle search input
+        if self.focus == Focus::Search {
+            return self.handle_search_key(key);
+        }
+
         // Global keys (work in any pane)
         match key.code {
             KeyCode::Char('q') => return Some(Message::Quit),
+            KeyCode::Char('?') => {
+                self.g_pending = false;
+                self.show_help = true;
+                return None;
+            }
+            KeyCode::Char('/') => {
+                self.g_pending = false;
+                self.focus = Focus::Search;
+                self.search_query.clear();
+                self.search_includes_body = false;
+                self.reload_from_cache();
+                return None;
+            }
+            KeyCode::Char('\\') => {
+                self.g_pending = false;
+                self.focus = Focus::Search;
+                self.search_query.clear();
+                self.search_includes_body = true;
+                self.reload_from_cache();
+                return None;
+            }
+            KeyCode::Char('1') => {
+                self.g_pending = false;
+                self.sidebar_index = 0;
+                self.switch_mailbox(Mailbox::Inbox);
+                self.focus = Focus::List;
+                return None;
+            }
+            KeyCode::Char('2') => {
+                self.g_pending = false;
+                self.sidebar_index = 1;
+                self.switch_mailbox(Mailbox::Drafts);
+                self.focus = Focus::List;
+                return None;
+            }
+            KeyCode::Char('3') => {
+                self.g_pending = false;
+                self.sidebar_index = 2;
+                self.switch_mailbox(Mailbox::Sent);
+                self.focus = Focus::List;
+                return None;
+            }
+            KeyCode::Char('4') => {
+                self.g_pending = false;
+                self.sidebar_index = 3;
+                self.switch_mailbox(Mailbox::Archive);
+                self.focus = Focus::List;
+                return None;
+            }
             KeyCode::Char('s') => {
                 self.g_pending = false;
                 self.focus = Focus::Sidebar;
@@ -289,6 +360,7 @@ impl App {
                     Focus::Sidebar => Focus::List,
                     Focus::List => Focus::Preview,
                     Focus::Preview => Focus::Sidebar,
+                    Focus::Search => Focus::List,
                 };
                 return None;
             }
@@ -298,6 +370,7 @@ impl App {
                     Focus::Sidebar => Focus::Preview,
                     Focus::List => Focus::Sidebar,
                     Focus::Preview => Focus::List,
+                    Focus::Search => Focus::List,
                 };
                 return None;
             }
@@ -309,6 +382,7 @@ impl App {
             Focus::Sidebar => self.handle_sidebar_key(key),
             Focus::List => self.handle_list_key(key),
             Focus::Preview => self.handle_preview_key(key),
+            Focus::Search => unreachable!(),
         }
     }
 
@@ -520,6 +594,78 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    fn handle_help_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match key.code {
+            KeyCode::Char('?') | KeyCode::Esc => {
+                self.show_help = false;
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_search_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match key.code {
+            KeyCode::Enter => {
+                self.focus = Focus::List;
+            }
+            KeyCode::Esc => {
+                self.search_query.clear();
+                self.search_includes_body = false;
+                self.reload_from_cache();
+                self.focus = Focus::List;
+            }
+            KeyCode::Char(c) => {
+                self.search_query.push(c);
+                self.apply_search_filter();
+            }
+            KeyCode::Backspace => {
+                self.search_query.pop();
+                self.apply_search_filter();
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Re-filter emails from cache based on the current search query.
+    fn apply_search_filter(&mut self) {
+        let idx = self.active_mailbox.index();
+        let all_emails = self.email_cache[idx].as_ref().cloned().unwrap_or_default();
+
+        if self.search_query.is_empty() {
+            self.emails = all_emails;
+        } else {
+            let query = self.search_query.to_lowercase();
+            let mailbox = self.active_mailbox;
+            let includes_body = self.search_includes_body;
+            self.emails = all_emails
+                .into_iter()
+                .filter(|e| {
+                    e.subject.to_lowercase().contains(&query)
+                        || e.display_contact(mailbox).to_lowercase().contains(&query)
+                        || e.date_display.to_lowercase().contains(&query)
+                        || e.from.to_lowercase().contains(&query)
+                        || e.to.to_lowercase().contains(&query)
+                        || (includes_body && e.body.to_lowercase().contains(&query))
+                })
+                .collect();
+        }
+
+        self.list_index = 0;
+        self.preview_scroll = 0;
+    }
+
+    /// Reload emails from cache without invalidating (restores full unfiltered list).
+    fn reload_from_cache(&mut self) {
+        let idx = self.active_mailbox.index();
+        if let Some(cached) = &self.email_cache[idx] {
+            self.emails = cached.clone();
+        }
+        self.list_index = 0;
+        self.preview_scroll = 0;
     }
 }
 

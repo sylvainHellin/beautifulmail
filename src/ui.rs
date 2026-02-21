@@ -1,4 +1,4 @@
-use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
@@ -68,6 +68,11 @@ pub fn view(app: &App, frame: &mut Frame) {
     if let Some(dialog) = &app.confirm_dialog {
         render_confirm_dialog(dialog, frame, area);
     }
+
+    // Help overlay (renders on top of everything)
+    if app.show_help {
+        render_help_overlay(frame, area);
+    }
 }
 
 /// Render the sidebar with mailbox list.
@@ -117,31 +122,73 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(sidebar_content, inner);
 }
 
-/// Render the email list as a table.
+/// Render the email list as a table, with optional search bar.
 fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
     let border_style = pane_border_style(app.focus, Focus::List);
+    let title = if !app.search_query.is_empty() && app.focus != Focus::Search {
+        if app.search_includes_body {
+            format!(" {} (content search) ", app.active_mailbox.label())
+        } else {
+            format!(" {} (filtered) ", app.active_mailbox.label())
+        }
+    } else {
+        format!(" {} ", app.active_mailbox.label())
+    };
     let block = Block::default()
-        .title(format!(" {} ", app.active_mailbox.label()))
+        .title(title)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
         .style(Style::default().bg(theme::BASE));
 
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split inner area for optional search bar
+    let search_visible = app.focus == Focus::Search || !app.search_query.is_empty();
+    let (search_area, list_area) = if search_visible {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner);
+        (Some(chunks[0]), chunks[1])
+    } else {
+        (None, inner)
+    };
+
+    // Render search bar
+    if let Some(search_rect) = search_area {
+        let prefix = if app.search_includes_body { "\\" } else { "/" };
+        let mut spans = vec![
+            Span::styled(prefix, Style::default().fg(theme::BLUE)),
+            Span::styled(app.search_query.as_str(), Style::default().fg(theme::TEXT)),
+        ];
+        if app.focus == Focus::Search {
+            spans.push(Span::styled(
+                "\u{2588}",
+                Style::default().fg(theme::BLUE),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), search_rect);
+    }
+
     if app.emails.is_empty() {
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let empty = Paragraph::new(format!(
-            "\n  No emails in {}\n\n  Press f to fetch new emails",
-            app.active_mailbox.label()
-        ))
-        .style(Style::default().fg(theme::SUBTEXT0));
-        frame.render_widget(empty, inner);
+        let msg = if !app.search_query.is_empty() {
+            "  No matching emails".to_string()
+        } else {
+            format!(
+                "\n  No emails in {}\n\n  Press f to fetch new emails",
+                app.active_mailbox.label()
+            )
+        };
+        let empty =
+            Paragraph::new(msg).style(Style::default().fg(theme::SUBTEXT0));
+        frame.render_widget(empty, list_area);
         return;
     }
 
-    let inner = block.inner(area);
     // Calculate column widths from available space
-    let available_width = inner.width as usize;
+    let available_width = list_area.width as usize;
     let date_width = 10; // YYYY-MM-DD
     let status_width = 8;
     let spacing = 6; // gaps between columns
@@ -203,7 +250,6 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
     )
     .header(header)
     .column_spacing(1)
-    .block(block)
     .row_highlight_style(
         Style::default()
             .bg(theme::SURFACE0)
@@ -213,7 +259,7 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
 
     let mut state = TableState::default();
     state.select(Some(app.list_index));
-    frame.render_stateful_widget(table, area, &mut state);
+    frame.render_stateful_widget(table, list_area, &mut state);
 }
 
 /// Render the preview panel showing headers and body of the selected email.
@@ -330,25 +376,43 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Render the status bar at the bottom.
 fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
-    let content = if let Some(msg) = &app.status_message {
-        // Show status feedback message
+    // Right side: mailbox name + count
+    let total = app.mailbox_counts[app.active_mailbox.index()];
+    let shown = app.emails.len();
+    let right_text = if !app.search_query.is_empty() && shown != total {
+        format!(" {} {}/{} ", app.active_mailbox.label(), shown, total)
+    } else {
+        format!(" {} {} ", app.active_mailbox.label(), total)
+    };
+    let right_len = right_text.len() as u16;
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(right_len)])
+        .split(area);
+
+    // Left side: hints or status message
+    let left_content = if let Some(msg) = &app.status_message {
         Line::from(vec![
             Span::styled(" ", Style::default()),
             Span::styled(msg.as_str(), Style::default().fg(theme::GREEN)),
         ])
     } else {
-        // Show context-sensitive keybinding hints
         match app.focus {
             Focus::Sidebar => Line::from(vec![
                 hint_span(" j/k"),
                 desc_span("nav "),
                 hint_span("Enter"),
                 desc_span("select "),
+                hint_span("/"),
+                desc_span("search "),
+                hint_span("?"),
+                desc_span("help "),
                 hint_span("q"),
                 desc_span("quit"),
             ]),
             Focus::List => Line::from(vec![
-                hint_span(" Enter"),
+                hint_span(" e"),
                 desc_span("edit "),
                 hint_span("r"),
                 desc_span("reply "),
@@ -358,14 +422,14 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 desc_span("approve "),
                 hint_span("x"),
                 desc_span("send "),
-                hint_span("y"),
-                desc_span("copy "),
                 hint_span("n"),
                 desc_span("new "),
-                hint_span("f"),
-                desc_span("fetch "),
-                hint_span("F"),
-                desc_span("sync"),
+                hint_span("/"),
+                desc_span("filter "),
+                hint_span("\\"),
+                desc_span("search "),
+                hint_span("?"),
+                desc_span("help"),
             ]),
             Focus::Preview => Line::from(vec![
                 hint_span(" j/k"),
@@ -374,15 +438,39 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 desc_span("page "),
                 hint_span("h"),
                 desc_span("back "),
+                hint_span("/"),
+                desc_span("search "),
+                hint_span("?"),
+                desc_span("help "),
                 hint_span("q"),
                 desc_span("quit"),
             ]),
+            Focus::Search => {
+                let mut spans = vec![
+                    hint_span(" Enter"),
+                    desc_span("confirm "),
+                    hint_span("Esc"),
+                    desc_span("cancel"),
+                ];
+                if app.search_includes_body {
+                    spans.push(desc_span(" (content search)"));
+                }
+                Line::from(spans)
+            }
         }
     };
 
-    let status = Paragraph::new(content)
+    let left = Paragraph::new(left_content)
         .style(Style::default().fg(theme::SUBTEXT0).bg(theme::SURFACE0));
-    frame.render_widget(status, area);
+    frame.render_widget(left, chunks[0]);
+
+    let right = Paragraph::new(Line::from(Span::styled(
+        right_text,
+        Style::default().fg(theme::BLUE),
+    )))
+    .style(Style::default().bg(theme::SURFACE0))
+    .alignment(Alignment::Right);
+    frame.render_widget(right, chunks[1]);
 }
 
 /// Render a centered confirmation dialog overlay.
@@ -480,9 +568,96 @@ fn status_color(status: &str) -> Style {
     }
 }
 
+/// Render a full-screen help overlay listing all keybindings.
+fn render_help_overlay(frame: &mut Frame, area: Rect) {
+    let help_width = 50u16.min(area.width.saturating_sub(4));
+    let help_height = 34u16.min(area.height.saturating_sub(2));
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(help_width)])
+        .flex(Flex::Center)
+        .split(area);
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(help_height)])
+        .flex(Flex::Center)
+        .split(horizontal[0]);
+
+    let help_area = vertical[0];
+    frame.render_widget(Clear, help_area);
+
+    let block = Block::default()
+        .title(" Help ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::BLUE))
+        .style(Style::default().bg(theme::BASE));
+
+    let section = |title: &str| -> Line {
+        Line::from(Span::styled(
+            format!("  {title}"),
+            Style::default()
+                .fg(theme::MAUVE)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+
+    let entry = |key: &str, desc: &str| -> Line {
+        Line::from(vec![
+            Span::styled(format!("  {key:<12}"), Style::default().fg(theme::BLUE)),
+            Span::styled(desc.to_string(), Style::default().fg(theme::TEXT)),
+        ])
+    };
+
+    let lines = vec![
+        section("GLOBAL"),
+        entry("q", "Quit"),
+        entry("1/2/3/4", "Jump to mailbox"),
+        entry("s", "Focus sidebar"),
+        entry("Tab", "Cycle focus forward"),
+        entry("Shift+Tab", "Cycle focus backward"),
+        entry("/", "Filter by metadata"),
+        entry("\\", "Search email content"),
+        entry("?", "Toggle this help"),
+        Line::from(""),
+        section("SIDEBAR"),
+        entry("j/k", "Navigate mailboxes"),
+        entry("Enter/l", "Select mailbox"),
+        entry("Esc/h", "Return to list"),
+        Line::from(""),
+        section("EMAIL LIST"),
+        entry("j/k", "Navigate emails"),
+        entry("gg / G", "Jump to top / bottom"),
+        entry("h / l", "Focus sidebar / preview"),
+        entry("Enter / e", "Open in editor"),
+        entry("r / R", "Reply / Reply-all"),
+        entry("a", "Archive"),
+        entry("d", "Delete"),
+        entry("A", "Approve draft"),
+        entry("x / X", "Send / Send all approved"),
+        entry("y", "Copy file path"),
+        entry("n", "New draft"),
+        entry("f / F", "Fetch / Full sync"),
+        Line::from(""),
+        section("PREVIEW"),
+        entry("j/k", "Scroll line by line"),
+        entry("d/u", "Half-page down / up"),
+        entry("Esc/h", "Return to list"),
+    ];
+
+    let help = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(help, help_area);
+}
+
 /// Return border style based on whether this pane is focused.
 fn pane_border_style(current_focus: Focus, pane: Focus) -> Style {
-    if current_focus == pane {
+    let focused =
+        current_focus == pane || (current_focus == Focus::Search && pane == Focus::List);
+    if focused {
         Style::default().fg(theme::BLUE)
     } else {
         Style::default().fg(theme::OVERLAY0)
