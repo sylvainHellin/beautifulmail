@@ -9,6 +9,7 @@ use crate::email::{self, EmailEntry};
 pub enum Focus {
     Sidebar,
     List,
+    Headers,
     Preview,
     Search,
 }
@@ -135,7 +136,9 @@ pub struct App {
     pub list_index: usize,
     /// Whether the previous keypress was `g` (for `gg` to go to top).
     pub g_pending: bool,
-    /// Vertical scroll offset for the preview panel.
+    /// Vertical scroll offset for the headers panel.
+    pub headers_scroll: u16,
+    /// Vertical scroll offset for the preview/body panel.
     pub preview_scroll: u16,
     /// Cached emails per mailbox (lazy-loaded).
     email_cache: [Option<Vec<EmailEntry>>; 4],
@@ -184,6 +187,7 @@ impl App {
             emails,
             list_index: 0,
             g_pending: false,
+            headers_scroll: 0,
             preview_scroll: 0,
             email_cache: cache,
             pending_action: None,
@@ -363,22 +367,29 @@ impl App {
                 self.focus = Focus::Sidebar;
                 return None;
             }
-            KeyCode::Tab => {
+            KeyCode::Tab | KeyCode::Char('l') => {
                 self.g_pending = false;
+                // In sidebar, also select the highlighted mailbox
+                if self.focus == Focus::Sidebar {
+                    let mailbox = Mailbox::ALL[self.sidebar_index];
+                    self.switch_mailbox(mailbox);
+                }
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::List,
                     Focus::List => Focus::Preview,
-                    Focus::Preview => Focus::Sidebar,
+                    Focus::Preview => Focus::Headers,
+                    Focus::Headers => Focus::Sidebar,
                     Focus::Search => Focus::List,
                 };
                 return None;
             }
-            KeyCode::BackTab => {
+            KeyCode::BackTab | KeyCode::Char('h') => {
                 self.g_pending = false;
                 self.focus = match self.focus {
-                    Focus::Sidebar => Focus::Preview,
-                    Focus::List => Focus::Sidebar,
+                    Focus::Sidebar => Focus::Headers,
+                    Focus::Headers => Focus::Preview,
                     Focus::Preview => Focus::List,
+                    Focus::List => Focus::Sidebar,
                     Focus::Search => Focus::List,
                 };
                 return None;
@@ -390,6 +401,7 @@ impl App {
         match self.focus {
             Focus::Sidebar => self.handle_sidebar_key(key),
             Focus::List => self.handle_list_key(key),
+            Focus::Headers => self.handle_headers_key(key),
             Focus::Preview => self.handle_preview_key(key),
             Focus::Search => unreachable!(),
         }
@@ -428,14 +440,25 @@ impl App {
                 self.sidebar_index = self.sidebar_index.saturating_sub(1);
                 None
             }
-            KeyCode::Enter | KeyCode::Char('l') => {
+            KeyCode::Enter => {
                 let mailbox = Mailbox::ALL[self.sidebar_index];
                 self.switch_mailbox(mailbox);
                 self.focus = Focus::List;
                 None
             }
-            KeyCode::Esc | KeyCode::Char('h') => {
-                self.focus = Focus::List;
+            _ => None,
+        }
+    }
+
+    fn handle_headers_key(&mut self, key: KeyEvent) -> Option<Message> {
+        self.g_pending = false;
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.headers_scroll = self.headers_scroll.saturating_add(1);
+                None
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.headers_scroll = self.headers_scroll.saturating_sub(1);
                 None
             }
             _ => None,
@@ -445,10 +468,8 @@ impl App {
     fn handle_list_key(&mut self, key: KeyEvent) -> Option<Message> {
         if self.emails.is_empty() {
             self.g_pending = false;
-            // Allow focus changes, fetch/sync/new even when list is empty
+            // Allow fetch/sync/new even when list is empty
             match key.code {
-                KeyCode::Char('h') => self.focus = Focus::Sidebar,
-                KeyCode::Char('l') => self.focus = Focus::Preview,
                 KeyCode::Char('f') => self.pending_action = Some(Action::Fetch),
                 KeyCode::Char('F') => self.pending_action = Some(Action::Sync),
                 KeyCode::Char('n') => self.pending_action = Some(Action::NewDraft),
@@ -483,15 +504,6 @@ impl App {
                 self.g_pending = false;
                 self.list_index = self.list_index.saturating_sub(1);
             }
-            KeyCode::Char('h') => {
-                self.g_pending = false;
-                self.focus = Focus::Sidebar;
-            }
-            KeyCode::Char('l') => {
-                self.g_pending = false;
-                self.focus = Focus::Preview;
-            }
-
             // -- Actions --
             KeyCode::Enter | KeyCode::Char('e') => {
                 self.g_pending = false;
@@ -569,8 +581,9 @@ impl App {
             }
         }
 
-        // Reset preview scroll when selection changes
+        // Reset scroll when selection changes
         if self.list_index != old_index {
+            self.headers_scroll = 0;
             self.preview_scroll = 0;
         }
 
@@ -598,7 +611,7 @@ impl App {
                 self.preview_scroll = self.preview_scroll.saturating_sub(10);
                 None
             }
-            KeyCode::Esc | KeyCode::Char('h') => {
+            KeyCode::Esc => {
                 self.focus = Focus::List;
                 None
             }
@@ -665,6 +678,7 @@ impl App {
         }
 
         self.list_index = 0;
+        self.headers_scroll = 0;
         self.preview_scroll = 0;
     }
 
@@ -675,6 +689,7 @@ impl App {
             self.emails = cached.clone();
         }
         self.list_index = 0;
+        self.headers_scroll = 0;
         self.preview_scroll = 0;
     }
 }

@@ -1,5 +1,5 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
@@ -11,7 +11,7 @@ use crate::theme;
 pub fn view(app: &App, frame: &mut Frame) {
     let area = frame.area();
 
-    // Vertical split: main area + status bar
+    // Vertical: main area + status bar
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
@@ -20,45 +20,60 @@ pub fn view(app: &App, frame: &mut Frame) {
     let main_area = outer[0];
     let status_area = outer[1];
 
-    // Horizontal split for main area: sidebar + list + preview
-    let show_preview = app.terminal_width >= 80;
+    let show_right = app.terminal_width >= 80;
     let show_sidebar = app.terminal_width >= 40;
 
-    let panels = if show_sidebar && show_preview {
-        Layout::default()
+    if show_right {
+        // Two-column layout: left (sidebar + list) | right (headers + body)
+        let columns = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(14),
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
+                Constraint::Percentage(35),
+                Constraint::Percentage(65),
             ])
-            .split(main_area)
+            .split(main_area);
+
+        let left_col = columns[0];
+        let right_col = columns[1];
+
+        // Left column: sidebar (compact) + email list
+        let left_panels = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(7), // sidebar: 4 mailboxes + border
+                Constraint::Min(0),    // email list fills rest
+            ])
+            .split(left_col);
+
+        render_sidebar(app, frame, left_panels[0]);
+        render_email_list(app, frame, left_panels[1]);
+
+        // Right column: headers (fixed 6 lines, matching sidebar) + body
+        let right_panels = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(7),
+                Constraint::Min(0),
+            ])
+            .split(right_col);
+
+        render_headers(app, frame, right_panels[0]);
+        render_body(app, frame, right_panels[1]);
     } else if show_sidebar {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(14), Constraint::Min(0)])
-            .split(main_area)
+        // Stacked: sidebar + email list (no right column)
+        let left_panels = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(6),
+                Constraint::Min(0),
+            ])
+            .split(main_area);
+
+        render_sidebar(app, frame, left_panels[0]);
+        render_email_list(app, frame, left_panels[1]);
     } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(0)])
-            .split(main_area)
-    };
-
-    // Render panels
-    let mut panel_idx = 0;
-
-    if show_sidebar {
-        render_sidebar(app, frame, panels[panel_idx]);
-        panel_idx += 1;
-    }
-
-    // Email list panel
-    render_email_list(app, frame, panels[panel_idx]);
-    panel_idx += 1;
-
-    if show_preview && panel_idx < panels.len() {
-        render_preview(app, frame, panels[panel_idx]);
+        // List only
+        render_email_list(app, frame, main_area);
     }
 
     // Status bar
@@ -190,188 +205,336 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
     // Calculate column widths from available space
     let available_width = list_area.width as usize;
     let date_width = 10; // YYYY-MM-DD
-    let status_width = 8;
-    let spacing = 6; // gaps between columns
-    let contact_width =
-        20.min(available_width.saturating_sub(date_width + status_width + spacing));
-    let subject_width =
-        available_width.saturating_sub(date_width + contact_width + status_width + spacing);
+    let spacing = 3; // gaps between columns
 
-    let header = Row::new(vec![
-        Cell::from("DATE").style(Style::default().fg(theme::SUBTEXT0)),
-        Cell::from("CONTACT").style(Style::default().fg(theme::SUBTEXT0)),
-        Cell::from("SUBJECT").style(Style::default().fg(theme::SUBTEXT0)),
-        Cell::from("STATUS").style(Style::default().fg(theme::SUBTEXT0)),
-    ])
-    .height(1);
+    if available_width > 45 {
+        // 3 columns: DATE + CONTACT + SUBJECT
+        let contact_width =
+            15.min(available_width.saturating_sub(date_width + spacing + 10));
+        let subject_width =
+            available_width.saturating_sub(date_width + contact_width + spacing);
 
-    let rows: Vec<Row> = app
-        .emails
-        .iter()
-        .enumerate()
-        .map(|(i, email)| {
-            let is_selected = i == app.list_index;
+        let header = Row::new(vec![
+            Cell::from("DATE").style(Style::default().fg(theme::SUBTEXT0)),
+            Cell::from("CONTACT").style(Style::default().fg(theme::SUBTEXT0)),
+            Cell::from("SUBJECT").style(Style::default().fg(theme::SUBTEXT0)),
+        ])
+        .height(1);
 
-            let contact = truncate(
-                email.display_contact(app.active_mailbox),
-                contact_width,
-            );
-            let subject = truncate(&email.subject, subject_width);
-            let status_style = status_color(&email.status);
+        let rows: Vec<Row> = app
+            .emails
+            .iter()
+            .enumerate()
+            .map(|(i, email)| {
+                let is_selected = i == app.list_index;
+                let contact = truncate(
+                    email.display_contact(app.active_mailbox),
+                    contact_width,
+                );
+                let subject = truncate(&email.subject, subject_width);
 
-            let row_style = if is_selected {
-                Style::default().bg(theme::SURFACE0).fg(theme::GREEN)
-            } else {
-                Style::default().fg(theme::TEXT)
-            };
-
-            Row::new(vec![
-                Cell::from(email.date_display.clone()),
-                Cell::from(contact),
-                Cell::from(subject),
-                Cell::from(email.status.clone()).style(if is_selected {
-                    row_style
+                let row_style = if is_selected {
+                    Style::default().bg(theme::SURFACE0).fg(theme::GREEN)
                 } else {
-                    status_style
-                }),
-            ])
-            .style(row_style)
-        })
-        .collect();
+                    Style::default().fg(theme::TEXT)
+                };
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(date_width as u16),
-            Constraint::Length(contact_width as u16),
-            Constraint::Min(subject_width as u16),
-            Constraint::Length(status_width as u16),
-        ],
-    )
-    .header(header)
-    .column_spacing(1)
-    .row_highlight_style(
-        Style::default()
-            .bg(theme::SURFACE0)
-            .fg(theme::GREEN)
-            .add_modifier(Modifier::BOLD),
-    );
+                Row::new(vec![
+                    Cell::from(email.date_display.clone()),
+                    Cell::from(contact),
+                    Cell::from(subject),
+                ])
+                .style(row_style)
+            })
+            .collect();
 
-    let mut state = TableState::default();
-    state.select(Some(app.list_index));
-    frame.render_stateful_widget(table, list_area, &mut state);
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(date_width as u16),
+                Constraint::Length(contact_width as u16),
+                Constraint::Min(subject_width as u16),
+            ],
+        )
+        .header(header)
+        .column_spacing(1)
+        .row_highlight_style(
+            Style::default()
+                .bg(theme::SURFACE0)
+                .fg(theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        );
+
+        let mut state = TableState::default();
+        state.select(Some(app.list_index));
+        frame.render_stateful_widget(table, list_area, &mut state);
+    } else {
+        // 2 columns: DATE + SUBJECT only
+        let subject_width = available_width.saturating_sub(date_width + 2);
+
+        let header = Row::new(vec![
+            Cell::from("DATE").style(Style::default().fg(theme::SUBTEXT0)),
+            Cell::from("SUBJECT").style(Style::default().fg(theme::SUBTEXT0)),
+        ])
+        .height(1);
+
+        let rows: Vec<Row> = app
+            .emails
+            .iter()
+            .enumerate()
+            .map(|(i, email)| {
+                let is_selected = i == app.list_index;
+                let subject = truncate(&email.subject, subject_width);
+
+                let row_style = if is_selected {
+                    Style::default().bg(theme::SURFACE0).fg(theme::GREEN)
+                } else {
+                    Style::default().fg(theme::TEXT)
+                };
+
+                Row::new(vec![
+                    Cell::from(email.date_display.clone()),
+                    Cell::from(subject),
+                ])
+                .style(row_style)
+            })
+            .collect();
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(date_width as u16),
+                Constraint::Min(subject_width as u16),
+            ],
+        )
+        .header(header)
+        .column_spacing(1)
+        .row_highlight_style(
+            Style::default()
+                .bg(theme::SURFACE0)
+                .fg(theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        );
+
+        let mut state = TableState::default();
+        state.select(Some(app.list_index));
+        frame.render_stateful_widget(table, list_area, &mut state);
+    }
 }
 
-/// Render the preview panel showing headers and body of the selected email.
-fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
-    let border_style = pane_border_style(app.focus, Focus::Preview);
+/// Render a single header field as a styled Line.
+fn header_line<'a>(label: &'a str, value: &'a str, color: Color) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(
+            format!(" {label}: "),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(value, Style::default().fg(color)),
+    ])
+}
+
+/// Render the email headers panel (fixed height, scrollable when focused).
+fn render_headers(app: &App, frame: &mut Frame, area: Rect) {
+    let border_style = pane_border_style(app.focus, Focus::Headers);
     let block = Block::default()
-        .title(" Preview ")
+        .title(" Headers ")
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
         .style(Style::default().bg(theme::BASE));
 
     let selected = app.emails.get(app.list_index);
-
     if selected.is_none() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let empty = Paragraph::new("\n  No email selected")
-            .style(Style::default().fg(theme::SUBTEXT0));
-        frame.render_widget(empty, inner);
+        frame.render_widget(
+            Paragraph::new("  No email selected")
+                .style(Style::default().fg(theme::SUBTEXT0)),
+            inner,
+        );
         return;
     }
 
     let email = selected.unwrap();
-
     let mut lines: Vec<Line> = Vec::new();
 
-    // Header fields
-    lines.push(Line::from(vec![
-        Span::styled(
-            "From: ",
-            Style::default()
-                .fg(theme::GREEN)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(&email.from, Style::default().fg(theme::GREEN)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            "To: ",
-            Style::default()
-                .fg(theme::BLUE)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(&email.to, Style::default().fg(theme::BLUE)),
-    ]));
+    lines.push(header_line("From", &email.from, theme::GREEN));
+    lines.push(header_line("To", &email.to, theme::BLUE));
     if let Some(cc) = &email.cc {
         if !cc.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "Cc: ",
-                    Style::default()
-                        .fg(theme::BLUE)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(cc.as_str(), Style::default().fg(theme::BLUE)),
-            ]));
+            lines.push(header_line("Cc", cc, theme::BLUE));
         }
     }
-    lines.push(Line::from(vec![
-        Span::styled(
-            "Subject: ",
-            Style::default()
-                .fg(theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(&email.subject, Style::default().fg(theme::YELLOW)),
-    ]));
-    if !email.date_display.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "Date: ",
-                Style::default()
-                    .fg(theme::MAUVE)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(&email.date_display, Style::default().fg(theme::MAUVE)),
-        ]));
-    }
-    lines.push(Line::from(vec![
-        Span::styled(
-            "Status: ",
-            Style::default()
-                .fg(theme::TEAL)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(&email.status, Style::default().fg(theme::TEAL)),
-    ]));
+    lines.push(header_line("Subj", &email.subject, theme::YELLOW));
 
-    // Separator
-    let inner_width = block.inner(area).width as usize;
-    lines.push(Line::from(Span::styled(
-        "\u{2500}".repeat(inner_width),
-        Style::default().fg(theme::OVERLAY0),
-    )));
-    lines.push(Line::from(""));
+    // Date and status on one line
+    let date_status = format!("{}  [{}]", email.date_display, email.status);
+    lines.push(header_line("Date", &date_status, theme::MAUVE));
 
-    // Body (replace {{SIGNATURE}} placeholder)
-    let body = email.body.replace("{{SIGNATURE}}", "[signature]");
-    for line in body.lines() {
-        lines.push(Line::from(Span::styled(
-            line.to_string(),
-            Style::default().fg(theme::TEXT),
-        )));
-    }
-
-    let preview = Paragraph::new(lines)
+    let content = Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false })
+        .scroll((app.headers_scroll, 0));
+    frame.render_widget(content, area);
+}
+
+/// Render the email body panel (scrollable, focused via Focus::Preview).
+fn render_body(app: &App, frame: &mut Frame, area: Rect) {
+    let border_style = pane_border_style(app.focus, Focus::Preview);
+    let block = Block::default()
+        .title(" Body ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .style(Style::default().bg(theme::BASE));
+
+    let selected = app.emails.get(app.list_index);
+    if selected.is_none() {
+        frame.render_widget(block, area);
+        return;
+    }
+
+    let email = selected.unwrap();
+    let body = email.body.replace("{{SIGNATURE}}", "[signature]");
+
+    // Pre-wrap text ourselves so quoted continuation lines keep their prefix
+    let inner_width = block.inner(area).width as usize;
+    let lines: Vec<Line> = wrap_and_style_body(&body, inner_width);
+
+    let content = Paragraph::new(lines)
+        .block(block)
         .scroll((app.preview_scroll, 0));
 
-    frame.render_widget(preview, area);
+    frame.render_widget(content, area);
+}
+
+/// Parse quote depth and return (depth, remaining content after `>` markers).
+fn parse_quote_depth(line: &str) -> (usize, &str) {
+    let trimmed = line.trim_start();
+    let mut depth = 0;
+    let mut pos = 0;
+    let bytes = trimmed.as_bytes();
+    while pos < bytes.len() && bytes[pos] == b'>' {
+        depth += 1;
+        pos += 1;
+        if pos < bytes.len() && bytes[pos] == b' ' {
+            pos += 1;
+        }
+    }
+    (depth, &trimmed[pos..])
+}
+
+/// Wrap body text manually, preserving quote prefixes on continuation lines.
+fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
+    let mut result: Vec<Line> = Vec::new();
+
+    for line in body.lines() {
+        // Signature placeholder
+        if line.trim() == "[signature]" {
+            result.push(Line::from(Span::styled(
+                "  -- signature --".to_string(),
+                Style::default().fg(theme::OVERLAY0),
+            )));
+            continue;
+        }
+
+        let (depth, content) = parse_quote_depth(line);
+
+        if depth == 0 {
+            // Regular or attribution line -- simple word wrap
+            let style = if is_attribution(line.trim()) {
+                Style::default()
+                    .fg(theme::SUBTEXT0)
+                    .add_modifier(Modifier::ITALIC)
+            } else {
+                Style::default().fg(theme::TEXT)
+            };
+            for wrapped in word_wrap(content, width) {
+                result.push(Line::from(Span::styled(wrapped, style)));
+            }
+        } else {
+            // Quoted line -- wrap with prefix on every continuation
+            let prefix = "\u{2502} ".repeat(depth);
+            let prefix_width = depth * 2; // "│ " is 2 chars per level
+            let text_width = width.saturating_sub(prefix_width);
+
+            let is_attr = is_attribution(content.trim());
+            let text_style = if is_attr {
+                Style::default()
+                    .fg(theme::SUBTEXT0)
+                    .add_modifier(Modifier::ITALIC)
+            } else {
+                match depth {
+                    1 => Style::default().fg(theme::OVERLAY0),
+                    _ => Style::default().fg(theme::SURFACE0),
+                }
+            };
+
+            if text_width < 5 {
+                // Too narrow to wrap meaningfully
+                result.push(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(theme::BLUE)),
+                    Span::styled(content.to_string(), text_style),
+                ]));
+            } else {
+                for wrapped in word_wrap(content, text_width) {
+                    result.push(Line::from(vec![
+                        Span::styled(prefix.clone(), Style::default().fg(theme::BLUE)),
+                        Span::styled(wrapped, text_style),
+                    ]));
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Check if a line is an attribution ("On ..., ... wrote:").
+fn is_attribution(line: &str) -> bool {
+    line.starts_with("On ") && line.ends_with("wrote:")
+}
+
+/// Simple word wrap: split text into lines that fit within `width` chars.
+/// Breaks on whitespace where possible, otherwise hard-breaks.
+fn word_wrap(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        let char_count = remaining.chars().count();
+        if char_count <= width {
+            lines.push(remaining.to_string());
+            break;
+        }
+
+        // Find the last space within the width limit
+        let byte_at_width: usize = remaining
+            .char_indices()
+            .nth(width)
+            .map_or(remaining.len(), |(i, _)| i);
+
+        let break_at = remaining[..byte_at_width]
+            .rfind(' ')
+            .map(|i| i + 1) // break after the space
+            .unwrap_or(byte_at_width); // hard break if no space
+
+        let (chunk, rest) = remaining.split_at(break_at);
+        lines.push(chunk.trim_end().to_string());
+        remaining = rest.trim_start();
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 /// Render the status bar at the bottom.
@@ -431,6 +594,18 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 desc_span("search "),
                 hint_span("?"),
                 desc_span("help"),
+            ]),
+            Focus::Headers => Line::from(vec![
+                hint_span(" j/k"),
+                desc_span("scroll "),
+                hint_span("h"),
+                desc_span("back "),
+                hint_span("l"),
+                desc_span("body "),
+                hint_span("?"),
+                desc_span("help "),
+                hint_span("q"),
+                desc_span("quit"),
             ]),
             Focus::Preview => Line::from(vec![
                 hint_span(" j/k"),
@@ -565,22 +740,10 @@ fn truncate(s: &str, max_width: usize) -> String {
     }
 }
 
-/// Return a style for the email status field.
-fn status_color(status: &str) -> Style {
-    match status {
-        "draft" => Style::default().fg(theme::YELLOW),
-        "approved" => Style::default().fg(theme::GREEN),
-        "sent" => Style::default().fg(theme::BLUE),
-        "inbox" => Style::default().fg(theme::TEXT),
-        "archived" => Style::default().fg(theme::OVERLAY0),
-        _ => Style::default().fg(theme::SUBTEXT0),
-    }
-}
-
 /// Render a full-screen help overlay listing all keybindings.
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let help_width = 50u16.min(area.width.saturating_sub(4));
-    let help_height = 34u16.min(area.height.saturating_sub(2));
+    let help_height = 38u16.min(area.height.saturating_sub(2));
 
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
@@ -639,7 +802,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         section("EMAIL LIST"),
         entry("j/k", "Navigate emails"),
         entry("gg / G", "Jump to top / bottom"),
-        entry("h / l", "Focus sidebar / preview"),
+        entry("h / l", "Focus sidebar / body"),
         entry("Enter / e", "Open in editor"),
         entry("r / R", "Reply / Reply-all"),
         entry("a", "Archive"),
@@ -650,7 +813,11 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         entry("n", "New draft"),
         entry("f / F", "Fetch / Full sync"),
         Line::from(""),
-        section("PREVIEW"),
+        section("HEADERS"),
+        entry("j/k", "Scroll headers"),
+        entry("h / l", "Back to list / body"),
+        Line::from(""),
+        section("BODY"),
         entry("j/k", "Scroll line by line"),
         entry("d/u", "Half-page down / up"),
         entry("Esc/h", "Return to list"),
