@@ -134,11 +134,20 @@ pub fn new_draft(name: &str) -> Result<String> {
     Ok(msg)
 }
 
-/// Delete a file from disk.
-pub fn delete_file(path: &Path) -> Result<()> {
-    std::fs::remove_file(path)
-        .with_context(|| format!("Failed to delete: {}", path.display()))?;
-    Ok(())
+/// Run `email delete <file>` (deletes server-side via IMAP + removes locally).
+pub fn delete(path: &Path) -> Result<String> {
+    let output = Command::new("email")
+        .arg("delete")
+        .arg(path)
+        .env("NO_COLOR", "1")
+        .output()
+        .context("Failed to run email delete")?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!("email delete failed: {}", err);
+    }
+    let msg = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(msg)
 }
 
 /// Run `email archive <file>` (archives server-side via IMAP + moves locally).

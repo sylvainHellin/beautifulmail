@@ -19,6 +19,8 @@ pub enum Message {
     Key(KeyEvent),
     Resize(u16, u16),
     Quit,
+    /// Background watcher detected new mail.
+    MailboxChanged,
 }
 
 /// A mailbox the user can navigate to.
@@ -152,6 +154,8 @@ pub struct App {
     pub search_includes_body: bool,
     /// Whether the help overlay is displayed.
     pub show_help: bool,
+    /// Whether the background mail watcher is active.
+    pub watcher_active: bool,
 }
 
 impl App {
@@ -189,6 +193,7 @@ impl App {
             search_query: String::new(),
             search_includes_body: false,
             show_help: false,
+            watcher_active: false,
         }
     }
 
@@ -199,6 +204,10 @@ impl App {
             Message::Resize(w, h) => {
                 self.terminal_width = w;
                 self.terminal_height = h;
+                None
+            }
+            Message::MailboxChanged => {
+                self.pending_action = Some(Action::Fetch);
                 None
             }
             Message::Quit => {

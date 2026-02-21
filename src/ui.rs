@@ -376,15 +376,16 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Render the status bar at the bottom.
 fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
-    // Right side: mailbox name + count
+    // Right side: optional WATCHING indicator + mailbox name + count
     let total = app.mailbox_counts[app.active_mailbox.index()];
     let shown = app.emails.len();
-    let right_text = if !app.search_query.is_empty() && shown != total {
-        format!(" {} {}/{} ", app.active_mailbox.label(), shown, total)
+    let watch_prefix = if app.watcher_active { "WATCHING " } else { "" };
+    let mailbox_text = if !app.search_query.is_empty() && shown != total {
+        format!("{} {}/{} ", app.active_mailbox.label(), shown, total)
     } else {
-        format!(" {} {} ", app.active_mailbox.label(), total)
+        format!("{} {} ", app.active_mailbox.label(), total)
     };
-    let right_len = right_text.len() as u16;
+    let right_len = (watch_prefix.len() + mailbox_text.len() + 1) as u16;
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -464,12 +465,20 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         .style(Style::default().fg(theme::SUBTEXT0).bg(theme::SURFACE0));
     frame.render_widget(left, chunks[0]);
 
-    let right = Paragraph::new(Line::from(Span::styled(
-        right_text,
+    let mut right_spans = vec![Span::styled(" ", Style::default())];
+    if app.watcher_active {
+        right_spans.push(Span::styled(
+            watch_prefix,
+            Style::default().fg(theme::TEAL),
+        ));
+    }
+    right_spans.push(Span::styled(
+        mailbox_text,
         Style::default().fg(theme::BLUE),
-    )))
-    .style(Style::default().bg(theme::SURFACE0))
-    .alignment(Alignment::Right);
+    ));
+    let right = Paragraph::new(Line::from(right_spans))
+        .style(Style::default().bg(theme::SURFACE0))
+        .alignment(Alignment::Right);
     frame.render_widget(right, chunks[1]);
 }
 
