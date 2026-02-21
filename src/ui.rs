@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, Focus, Mailbox};
@@ -76,6 +76,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .title(" Mail ")
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style)
         .style(Style::default().bg(theme::BASE));
 
@@ -122,6 +123,7 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .title(format!(" {} ", app.active_mailbox.label()))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style)
         .style(Style::default().bg(theme::BASE));
 
@@ -220,6 +222,7 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .title(" Preview ")
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style)
         .style(Style::default().bg(theme::BASE));
 
@@ -412,6 +415,7 @@ fn render_confirm_dialog(
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::YELLOW))
         .style(Style::default().bg(theme::BASE));
 

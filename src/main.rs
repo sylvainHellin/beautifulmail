@@ -76,13 +76,15 @@ fn handle_action(
 
         Action::Reply(reply_all) => {
             if let Some(path) = app.selected_email_path() {
-                suspend_terminal(terminal)?;
-                let result = cli::reply(&path, reply_all);
-                resume_terminal(terminal)?;
-                match result {
-                    Ok(()) => {
-                        app.set_status("Reply draft created".to_string());
-                        // Invalidate drafts cache since a new draft was created
+                match cli::reply(&path, reply_all) {
+                    Ok(draft_path) => {
+                        suspend_terminal(terminal)?;
+                        let edit_result = cli::edit_file(&draft_path);
+                        resume_terminal(terminal)?;
+                        match edit_result {
+                            Ok(()) => app.set_status("Reply draft ready".to_string()),
+                            Err(e) => app.set_status(format!("Editor failed: {e}")),
+                        }
                         app.invalidate_cache(Mailbox::Drafts);
                     }
                     Err(e) => app.set_status(format!("Reply failed: {e}")),
@@ -93,12 +95,13 @@ fn handle_action(
 
         Action::Send => {
             if let Some(path) = app.selected_email_path() {
-                suspend_terminal(terminal)?;
-                let result = cli::send(&path);
-                resume_terminal(terminal)?;
-                match result {
-                    Ok(()) => {
-                        app.set_status("Email sent".to_string());
+                match cli::send(&path) {
+                    Ok(msg) => {
+                        app.set_status(if msg.is_empty() {
+                            "Email sent".to_string()
+                        } else {
+                            msg
+                        });
                         app.invalidate_all_caches();
                     }
                     Err(e) => app.set_status(format!("Send failed: {e}")),
@@ -110,12 +113,13 @@ fn handle_action(
         Action::SendApproved => {
             if let Some(dir) = &app.mailbox_dirs[app.active_mailbox.index()] {
                 let dir = dir.clone();
-                suspend_terminal(terminal)?;
-                let result = cli::send_approved(&dir);
-                resume_terminal(terminal)?;
-                match result {
-                    Ok(()) => {
-                        app.set_status("Approved emails sent".to_string());
+                match cli::send_approved(&dir) {
+                    Ok(msg) => {
+                        app.set_status(if msg.is_empty() {
+                            "Approved emails sent".to_string()
+                        } else {
+                            msg
+                        });
                         app.invalidate_all_caches();
                     }
                     Err(e) => app.set_status(format!("Send-approved failed: {e}")),
@@ -159,18 +163,17 @@ fn handle_action(
 
         Action::Archive => {
             if let Some(path) = app.selected_email_path() {
-                if let Some(archive_dir) = &app.mailbox_dirs[Mailbox::Archive.index()] {
-                    let archive_dir = archive_dir.clone();
-                    match cli::archive_file(&path, &archive_dir) {
-                        Ok(()) => {
-                            app.set_status("Email archived".to_string());
-                            app.invalidate_cache(Mailbox::Archive);
-                            app.reload_current_mailbox();
-                        }
-                        Err(e) => app.set_status(format!("Archive failed: {e}")),
+                match cli::archive(&path) {
+                    Ok(msg) => {
+                        app.set_status(if msg.is_empty() {
+                            "Email archived".to_string()
+                        } else {
+                            msg
+                        });
+                        app.invalidate_cache(Mailbox::Archive);
+                        app.reload_current_mailbox();
                     }
-                } else {
-                    app.set_status("No archive directory configured".to_string());
+                    Err(e) => app.set_status(format!("Archive failed: {e}")),
                 }
             }
         }

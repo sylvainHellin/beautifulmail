@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -21,19 +21,27 @@ pub fn edit_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Run `email reply [--all] <file>` (interactive -- opens hx).
-pub fn reply(path: &Path, reply_all: bool) -> Result<()> {
+/// Run `email reply [--all] <file>` non-interactively, returning the draft path.
+pub fn reply(path: &Path, reply_all: bool) -> Result<PathBuf> {
     let mut cmd = Command::new("email");
     cmd.arg("reply");
     if reply_all {
         cmd.arg("--all");
     }
     cmd.arg(path);
-    let status = cmd.status().context("Failed to run email reply")?;
-    if !status.success() {
-        anyhow::bail!("email reply exited with status: {}", status);
+    cmd.env("NO_COLOR", "1");
+    let output = cmd.output().context("Failed to run email reply")?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!("email reply failed: {}", err);
     }
-    Ok(())
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(path_str) = line.strip_prefix("✓ Reply draft created: ") {
+            return Ok(PathBuf::from(path_str.trim()));
+        }
+    }
+    anyhow::bail!("Could not parse draft path from email reply output")
 }
 
 /// Run `email mark-approved <file>` (silent).
@@ -51,30 +59,36 @@ pub fn approve(path: &Path) -> Result<String> {
     Ok(msg)
 }
 
-/// Run `email send <file>` (interactive -- has confirmation prompt).
-pub fn send(path: &Path) -> Result<()> {
-    let status = Command::new("email")
-        .arg("send")
+/// Run `email send --yes <file>` (non-interactive, captures output).
+pub fn send(path: &Path) -> Result<String> {
+    let output = Command::new("email")
+        .args(["send", "--yes"])
         .arg(path)
-        .status()
+        .env("NO_COLOR", "1")
+        .output()
         .context("Failed to run email send")?;
-    if !status.success() {
-        anyhow::bail!("email send exited with status: {}", status);
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!("email send failed: {}", err);
     }
-    Ok(())
+    let msg = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(msg)
 }
 
-/// Run `email send-approved [dir]` (interactive -- has confirmation prompt).
-pub fn send_approved(dir: &Path) -> Result<()> {
-    let status = Command::new("email")
-        .arg("send-approved")
+/// Run `email send-approved --yes [dir]` (non-interactive, captures output).
+pub fn send_approved(dir: &Path) -> Result<String> {
+    let output = Command::new("email")
+        .args(["send-approved", "--yes"])
         .arg(dir)
-        .status()
+        .env("NO_COLOR", "1")
+        .output()
         .context("Failed to run email send-approved")?;
-    if !status.success() {
-        anyhow::bail!("email send-approved exited with status: {}", status);
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!("email send-approved failed: {}", err);
     }
-    Ok(())
+    let msg = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(msg)
 }
 
 /// Run `email fetch` (silent, captures output).
@@ -127,20 +141,20 @@ pub fn delete_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Archive an email: update status in frontmatter, move to archive directory.
-pub fn archive_file(path: &Path, archive_dir: &Path) -> Result<()> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read: {}", path.display()))?;
-    let updated = content.replace("status: inbox", "status: archived");
-    let filename = path
-        .file_name()
-        .context("No filename on email path")?;
-    let dest = archive_dir.join(filename);
-    std::fs::write(&dest, updated)
-        .with_context(|| format!("Failed to write: {}", dest.display()))?;
-    std::fs::remove_file(path)
-        .with_context(|| format!("Failed to remove original: {}", path.display()))?;
-    Ok(())
+/// Run `email archive <file>` (archives server-side via IMAP + moves locally).
+pub fn archive(path: &Path) -> Result<String> {
+    let output = Command::new("email")
+        .arg("archive")
+        .arg(path)
+        .env("NO_COLOR", "1")
+        .output()
+        .context("Failed to run email archive")?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!("email archive failed: {}", err);
+    }
+    let msg = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(msg)
 }
 
 /// Copy text to system clipboard.
