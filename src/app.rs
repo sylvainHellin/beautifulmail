@@ -445,13 +445,14 @@ impl App {
     fn handle_list_key(&mut self, key: KeyEvent) -> Option<Message> {
         if self.emails.is_empty() {
             self.g_pending = false;
-            // Allow fetch/sync/new even when list is empty
-            if key.code == KeyCode::Char('f') {
-                self.pending_action = Some(Action::Fetch);
-            } else if key.code == KeyCode::Char('F') {
-                self.pending_action = Some(Action::Sync);
-            } else if key.code == KeyCode::Char('n') {
-                self.pending_action = Some(Action::NewDraft);
+            // Allow focus changes, fetch/sync/new even when list is empty
+            match key.code {
+                KeyCode::Char('h') => self.focus = Focus::Sidebar,
+                KeyCode::Char('l') => self.focus = Focus::Preview,
+                KeyCode::Char('f') => self.pending_action = Some(Action::Fetch),
+                KeyCode::Char('F') => self.pending_action = Some(Action::Sync),
+                KeyCode::Char('n') => self.pending_action = Some(Action::NewDraft),
+                _ => {}
             }
             return None;
         }
