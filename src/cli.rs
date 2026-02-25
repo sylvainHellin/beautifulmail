@@ -59,10 +59,10 @@ pub fn approve(path: &Path) -> Result<String> {
     Ok(msg)
 }
 
-/// Run `email send --yes <file>` (non-interactive, captures output).
+/// Run `email send <file>` (captures output).
 pub fn send(path: &Path) -> Result<String> {
     let output = Command::new("email")
-        .args(["send", "--yes"])
+        .arg("send")
         .arg(path)
         .env("NO_COLOR", "1")
         .output()
@@ -75,10 +75,10 @@ pub fn send(path: &Path) -> Result<String> {
     Ok(msg)
 }
 
-/// Run `email send-approved --yes [dir]` (non-interactive, captures output).
+/// Run `email send-approved [dir]` (captures output).
 pub fn send_approved(dir: &Path) -> Result<String> {
     let output = Command::new("email")
-        .args(["send-approved", "--yes"])
+        .arg("send-approved")
         .arg(dir)
         .env("NO_COLOR", "1")
         .output()
@@ -114,6 +114,20 @@ pub fn sync() -> Result<String> {
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
         anyhow::bail!("email sync failed: {}", err);
+    }
+    let msg = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(msg)
+}
+
+/// Run `email sync --reconcile` (silent, captures output).
+pub fn sync_reconcile() -> Result<String> {
+    let output = Command::new("email")
+        .args(["sync", "--reconcile"])
+        .output()
+        .context("Failed to run email sync --reconcile")?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!("email sync --reconcile failed: {}", err);
     }
     let msg = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(msg)

@@ -95,6 +95,8 @@ pub enum Action {
     Fetch,
     /// Run `email sync` to full re-sync (silent).
     Sync,
+    /// Run `email sync --reconcile` to sync and reconcile (silent).
+    Reconcile,
 }
 
 /// Which destructive action a confirmation dialog is guarding.
@@ -273,9 +275,12 @@ impl App {
 
     /// Load (or use cached) emails for a mailbox and set as active.
     fn switch_mailbox(&mut self, mailbox: Mailbox) {
+        let changing = self.active_mailbox != mailbox;
         self.active_mailbox = mailbox;
-        self.search_query.clear();
-        self.search_includes_body = false;
+        if changing {
+            self.search_query.clear();
+            self.search_includes_body = false;
+        }
         let idx = mailbox.index();
 
         if let Some(cached) = &self.email_cache[idx] {
@@ -291,7 +296,9 @@ impl App {
 
         // Update count to match actual loaded data
         self.mailbox_counts[idx] = self.emails.len();
-        self.list_index = 0;
+        if changing {
+            self.list_index = 0;
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<Message> {
@@ -468,10 +475,11 @@ impl App {
     fn handle_list_key(&mut self, key: KeyEvent) -> Option<Message> {
         if self.emails.is_empty() {
             self.g_pending = false;
-            // Allow fetch/sync/new even when list is empty
+            // Allow fetch/sync/reconcile/new even when list is empty
             match key.code {
                 KeyCode::Char('f') => self.pending_action = Some(Action::Fetch),
                 KeyCode::Char('F') => self.pending_action = Some(Action::Sync),
+                KeyCode::Char('S') => self.pending_action = Some(Action::Reconcile),
                 KeyCode::Char('n') => self.pending_action = Some(Action::NewDraft),
                 _ => {}
             }
@@ -574,6 +582,10 @@ impl App {
             KeyCode::Char('F') => {
                 self.g_pending = false;
                 self.pending_action = Some(Action::Sync);
+            }
+            KeyCode::Char('S') => {
+                self.g_pending = false;
+                self.pending_action = Some(Action::Reconcile);
             }
 
             _ => {

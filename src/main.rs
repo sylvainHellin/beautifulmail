@@ -270,6 +270,24 @@ fn handle_action(
                 Err(e) => app.set_status(format!("Sync failed: {e}")),
             }
         }
+
+        Action::Reconcile => {
+            app.set_status("Reconciling...".to_string());
+            terminal.draw(|frame| ui::view(app, frame))?;
+
+            match cli::sync_reconcile() {
+                Ok(msg) => {
+                    app.set_status(if msg.is_empty() {
+                        "Reconcile complete".to_string()
+                    } else {
+                        msg
+                    });
+                    app.invalidate_all_caches();
+                    app.reload_current_mailbox();
+                }
+                Err(e) => app.set_status(format!("Reconcile failed: {e}")),
+            }
+        }
     }
 
     Ok(())

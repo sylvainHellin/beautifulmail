@@ -811,7 +811,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         entry("x / X", "Send / Send all approved"),
         entry("y", "Copy file path"),
         entry("n", "New draft"),
-        entry("f / F", "Fetch / Full sync"),
+        entry("f / F / S", "Fetch / Sync / Reconcile"),
         Line::from(""),
         section("HEADERS"),
         entry("j/k", "Scroll headers"),
