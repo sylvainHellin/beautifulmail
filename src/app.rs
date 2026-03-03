@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent};
+use serde::Deserialize;
 
 use crate::email::{self, EmailEntry};
 
@@ -24,50 +25,23 @@ pub enum Message {
     MailboxChanged,
 }
 
-/// A mailbox the user can navigate to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Mailbox {
+/// Behavioral kind of a mailbox (used for action differentiation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailboxKind {
     Inbox,
     Drafts,
     Sent,
     Archive,
+    Extra,
 }
 
-impl Mailbox {
-    pub const ALL: [Mailbox; 4] = [
-        Mailbox::Inbox,
-        Mailbox::Drafts,
-        Mailbox::Sent,
-        Mailbox::Archive,
-    ];
-
-    pub fn icon(self) -> &'static str {
-        match self {
-            Mailbox::Inbox => "󰇮",
-            Mailbox::Drafts => "󰏫",
-            Mailbox::Sent => "󰑫",
-            Mailbox::Archive => "󰀼",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Mailbox::Inbox => "Inbox",
-            Mailbox::Drafts => "Drafts",
-            Mailbox::Sent => "Sent",
-            Mailbox::Archive => "Archive",
-        }
-    }
-
-    /// Index into Mailbox::ALL.
-    pub fn index(self) -> usize {
-        match self {
-            Mailbox::Inbox => 0,
-            Mailbox::Drafts => 1,
-            Mailbox::Sent => 2,
-            Mailbox::Archive => 3,
-        }
-    }
+/// A mailbox entry with its metadata and resolved path.
+#[derive(Debug, Clone)]
+pub struct MailboxInfo {
+    pub label: String,
+    pub icon: &'static str,
+    pub dir: PathBuf,
+    pub kind: MailboxKind,
 }
 
 /// Side-effects that the main loop must execute (keeps update pure).
@@ -123,14 +97,14 @@ pub struct App {
     pub terminal_width: u16,
     pub terminal_height: u16,
 
+    /// Dynamic list of mailboxes loaded from config.
+    pub mailboxes: Vec<MailboxInfo>,
     /// Which mailbox is highlighted in the sidebar.
     pub sidebar_index: usize,
-    /// Which mailbox is currently selected (determines email list content).
-    pub active_mailbox: Mailbox,
-    /// Email count per mailbox, indexed same as Mailbox::ALL.
-    pub mailbox_counts: [usize; 4],
-    /// Resolved directory paths per mailbox, indexed same as Mailbox::ALL.
-    pub mailbox_dirs: [Option<PathBuf>; 4],
+    /// Which mailbox is currently selected (index into `mailboxes`).
+    pub active_mailbox: usize,
+    /// Email count per mailbox.
+    pub mailbox_counts: Vec<usize>,
 
     /// Loaded email entries for the active mailbox.
     pub emails: Vec<EmailEntry>,
@@ -143,7 +117,7 @@ pub struct App {
     /// Vertical scroll offset for the preview/body panel.
     pub preview_scroll: u16,
     /// Cached emails per mailbox (lazy-loaded).
-    email_cache: [Option<Vec<EmailEntry>>; 4],
+    email_cache: Vec<Option<Vec<EmailEntry>>>,
 
     /// An action the main loop should execute after this update cycle.
     pub pending_action: Option<Action>,
@@ -165,27 +139,31 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        let dirs = resolve_mailbox_dirs();
-        let counts = count_emails(&dirs);
+        let mailboxes = load_mailboxes_from_config();
+        let n = mailboxes.len();
+        let counts = count_all_emails(&mailboxes);
 
-        // Eagerly load the starting mailbox (inbox)
-        let emails = dirs[0]
-            .as_ref()
-            .map(|d| email::load_emails(d))
-            .unwrap_or_default();
+        // Eagerly load the starting mailbox (first one, typically inbox)
+        let emails = if !mailboxes.is_empty() {
+            email::load_emails(&mailboxes[0].dir)
+        } else {
+            Vec::new()
+        };
 
-        let mut cache: [Option<Vec<EmailEntry>>; 4] = [None, None, None, None];
-        cache[0] = Some(emails.clone());
+        let mut cache: Vec<Option<Vec<EmailEntry>>> = vec![None; n];
+        if !cache.is_empty() {
+            cache[0] = Some(emails.clone());
+        }
 
         Self {
             focus: Focus::List,
             running: true,
             terminal_width: 0,
             terminal_height: 0,
+            mailboxes,
             sidebar_index: 0,
-            active_mailbox: Mailbox::Inbox,
+            active_mailbox: 0,
             mailbox_counts: counts,
-            mailbox_dirs: dirs,
             emails,
             list_index: 0,
             g_pending: false,
@@ -201,6 +179,30 @@ impl App {
             show_help: false,
             watcher_active: false,
         }
+    }
+
+    /// Get the MailboxKind of the active mailbox.
+    pub fn active_kind(&self) -> MailboxKind {
+        self.mailboxes.get(self.active_mailbox)
+            .map(|m| m.kind)
+            .unwrap_or(MailboxKind::Inbox)
+    }
+
+    /// Get the label of the active mailbox.
+    pub fn active_label(&self) -> &str {
+        self.mailboxes.get(self.active_mailbox)
+            .map(|m| m.label.as_str())
+            .unwrap_or("Mail")
+    }
+
+    /// Get the directory of the active mailbox.
+    pub fn active_dir(&self) -> Option<&PathBuf> {
+        self.mailboxes.get(self.active_mailbox).map(|m| &m.dir)
+    }
+
+    /// Find the index of the first mailbox with the given kind.
+    pub fn find_mailbox_by_kind(&self, kind: MailboxKind) -> Option<usize> {
+        self.mailboxes.iter().position(|m| m.kind == kind)
     }
 
     /// Process a message and optionally return a follow-up message.
@@ -249,19 +251,23 @@ impl App {
         self.selected_email().map(|e| e.path.clone())
     }
 
-    /// Invalidate cache for a mailbox so it reloads on next access.
-    pub fn invalidate_cache(&mut self, mailbox: Mailbox) {
-        self.email_cache[mailbox.index()] = None;
+    /// Invalidate cache for a mailbox index so it reloads on next access.
+    pub fn invalidate_cache_idx(&mut self, idx: usize) {
+        if let Some(slot) = self.email_cache.get_mut(idx) {
+            *slot = None;
+        }
     }
 
     /// Invalidate all caches.
     pub fn invalidate_all_caches(&mut self) {
-        self.email_cache = [None, None, None, None];
+        for slot in &mut self.email_cache {
+            *slot = None;
+        }
     }
 
     /// Reload the currently active mailbox from disk.
     pub fn reload_current_mailbox(&mut self) {
-        self.invalidate_cache(self.active_mailbox);
+        self.invalidate_cache_idx(self.active_mailbox);
         self.switch_mailbox(self.active_mailbox);
         // Clamp list_index in case emails were removed
         if !self.emails.is_empty() {
@@ -270,32 +276,34 @@ impl App {
             self.list_index = 0;
         }
         // Also refresh all mailbox counts
-        self.mailbox_counts = count_emails(&self.mailbox_dirs);
+        self.mailbox_counts = count_all_emails(&self.mailboxes);
     }
 
-    /// Load (or use cached) emails for a mailbox and set as active.
-    fn switch_mailbox(&mut self, mailbox: Mailbox) {
-        let changing = self.active_mailbox != mailbox;
-        self.active_mailbox = mailbox;
+    /// Load (or use cached) emails for a mailbox index and set as active.
+    fn switch_mailbox(&mut self, idx: usize) {
+        let changing = self.active_mailbox != idx;
+        self.active_mailbox = idx;
         if changing {
             self.search_query.clear();
             self.search_includes_body = false;
         }
-        let idx = mailbox.index();
 
-        if let Some(cached) = &self.email_cache[idx] {
+        if let Some(cached) = self.email_cache.get(idx).and_then(|c| c.as_ref()) {
             self.emails = cached.clone();
-        } else {
-            let loaded = self.mailbox_dirs[idx]
-                .as_ref()
-                .map(|d| email::load_emails(d))
-                .unwrap_or_default();
-            self.email_cache[idx] = Some(loaded.clone());
+        } else if let Some(mb) = self.mailboxes.get(idx) {
+            let loaded = email::load_emails(&mb.dir);
+            if let Some(slot) = self.email_cache.get_mut(idx) {
+                *slot = Some(loaded.clone());
+            }
             self.emails = loaded;
+        } else {
+            self.emails = Vec::new();
         }
 
         // Update count to match actual loaded data
-        self.mailbox_counts[idx] = self.emails.len();
+        if let Some(count) = self.mailbox_counts.get_mut(idx) {
+            *count = self.emails.len();
+        }
         if changing {
             self.list_index = 0;
         }
@@ -341,33 +349,16 @@ impl App {
                 self.reload_from_cache();
                 return None;
             }
-            KeyCode::Char('1') => {
-                self.g_pending = false;
-                self.sidebar_index = 0;
-                self.switch_mailbox(Mailbox::Inbox);
-                self.focus = Focus::List;
-                return None;
-            }
-            KeyCode::Char('2') => {
-                self.g_pending = false;
-                self.sidebar_index = 1;
-                self.switch_mailbox(Mailbox::Drafts);
-                self.focus = Focus::List;
-                return None;
-            }
-            KeyCode::Char('3') => {
-                self.g_pending = false;
-                self.sidebar_index = 2;
-                self.switch_mailbox(Mailbox::Sent);
-                self.focus = Focus::List;
-                return None;
-            }
-            KeyCode::Char('4') => {
-                self.g_pending = false;
-                self.sidebar_index = 3;
-                self.switch_mailbox(Mailbox::Archive);
-                self.focus = Focus::List;
-                return None;
+            // Number keys 1-9 jump to mailbox by index
+            KeyCode::Char(c @ '1'..='9') => {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < self.mailboxes.len() {
+                    self.g_pending = false;
+                    self.sidebar_index = idx;
+                    self.switch_mailbox(idx);
+                    self.focus = Focus::List;
+                    return None;
+                }
             }
             KeyCode::Char('s') => {
                 self.g_pending = false;
@@ -378,8 +369,7 @@ impl App {
                 self.g_pending = false;
                 // In sidebar, also select the highlighted mailbox
                 if self.focus == Focus::Sidebar {
-                    let mailbox = Mailbox::ALL[self.sidebar_index];
-                    self.switch_mailbox(mailbox);
+                    self.switch_mailbox(self.sidebar_index);
                 }
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::List,
@@ -438,7 +428,7 @@ impl App {
         self.g_pending = false;
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.sidebar_index < Mailbox::ALL.len() - 1 {
+                if self.sidebar_index < self.mailboxes.len().saturating_sub(1) {
                     self.sidebar_index += 1;
                 }
                 None
@@ -448,8 +438,7 @@ impl App {
                 None
             }
             KeyCode::Enter => {
-                let mailbox = Mailbox::ALL[self.sidebar_index];
-                self.switch_mailbox(mailbox);
+                self.switch_mailbox(self.sidebar_index);
                 self.focus = Focus::List;
                 None
             }
@@ -563,7 +552,7 @@ impl App {
                 self.g_pending = false;
                 self.confirm_dialog = Some(ConfirmDialog {
                     title: "Send all approved emails?".to_string(),
-                    detail: format!("In {}", self.active_mailbox.label()),
+                    detail: format!("In {}", self.active_label()),
                     action: ConfirmAction::SendApproved,
                 });
             }
@@ -667,20 +656,23 @@ impl App {
 
     /// Re-filter emails from cache based on the current search query.
     fn apply_search_filter(&mut self) {
-        let idx = self.active_mailbox.index();
-        let all_emails = self.email_cache[idx].as_ref().cloned().unwrap_or_default();
+        let idx = self.active_mailbox;
+        let all_emails = self.email_cache.get(idx)
+            .and_then(|c| c.as_ref())
+            .cloned()
+            .unwrap_or_default();
 
         if self.search_query.is_empty() {
             self.emails = all_emails;
         } else {
             let query = self.search_query.to_lowercase();
-            let mailbox = self.active_mailbox;
+            let kind = self.active_kind();
             let includes_body = self.search_includes_body;
             self.emails = all_emails
                 .into_iter()
                 .filter(|e| {
                     e.subject.to_lowercase().contains(&query)
-                        || e.display_contact(mailbox).to_lowercase().contains(&query)
+                        || e.display_contact(kind).to_lowercase().contains(&query)
                         || e.date_display.to_lowercase().contains(&query)
                         || e.from.to_lowercase().contains(&query)
                         || e.to.to_lowercase().contains(&query)
@@ -696,8 +688,8 @@ impl App {
 
     /// Reload emails from cache without invalidating (restores full unfiltered list).
     fn reload_from_cache(&mut self) {
-        let idx = self.active_mailbox.index();
-        if let Some(cached) = &self.email_cache[idx] {
+        let idx = self.active_mailbox;
+        if let Some(Some(cached)) = self.email_cache.get(idx) {
             self.emails = cached.clone();
         }
         self.list_index = 0;
@@ -706,47 +698,155 @@ impl App {
     }
 }
 
-/// Load .env and resolve mailbox directory paths.
-fn resolve_mailbox_dirs() -> [Option<PathBuf>; 4] {
-    // Load .env from the email notes directory and standard locations
-    dotenvy::dotenv().ok();
+// -- Config parsing --
 
-    // Also try loading from the email project directory
-    let email_project = PathBuf::from("/Users/sylvainhellin/code/personal/email");
-    if email_project.join(".env").exists() {
-        dotenvy::from_path(email_project.join(".env")).ok();
+#[derive(Debug, Deserialize)]
+struct ConfigFile {
+    directories: Option<ConfigDirectories>,
+    mailboxes: Option<ConfigMailboxes>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigDirectories {
+    root: Option<String>,
+    drafts: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigMailboxes {
+    inbox: Option<ConfigMailbox>,
+    archive: Option<ConfigMailbox>,
+    sent: Option<ConfigMailbox>,
+    extra: Option<Vec<ConfigMailbox>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigMailbox {
+    #[allow(dead_code)]
+    server: Option<String>,
+    local: Option<String>,
+}
+
+fn expand_path(s: &str) -> PathBuf {
+    PathBuf::from(shellexpand::tilde(s).into_owned())
+}
+
+/// Load mailboxes from `~/.config/email/config.toml`.
+fn load_mailboxes_from_config() -> Vec<MailboxInfo> {
+    let config_path = expand_path("~/.config/email/config.toml");
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return default_mailboxes(),
+    };
+    let config: ConfigFile = match toml::from_str(&content) {
+        Ok(c) => c,
+        Err(_) => return default_mailboxes(),
+    };
+
+    let root = config.directories.as_ref()
+        .and_then(|d| d.root.as_ref())
+        .map(|r| expand_path(r))
+        .unwrap_or_else(|| expand_path("~/notes/email"));
+
+    let drafts_local = config.directories.as_ref()
+        .and_then(|d| d.drafts.as_ref())
+        .cloned()
+        .unwrap_or_else(|| "drafts".to_string());
+
+    let mbs = match &config.mailboxes {
+        Some(m) => m,
+        None => return default_mailboxes(),
+    };
+
+    let mut result = Vec::new();
+
+    // Inbox
+    let inbox_local = mbs.inbox.as_ref()
+        .and_then(|m| m.local.as_ref())
+        .cloned()
+        .unwrap_or_else(|| "inbox".to_string());
+    result.push(MailboxInfo {
+        label: "Inbox".to_string(),
+        icon: "\u{f0172}",  // 󰇮
+        dir: root.join(&inbox_local),
+        kind: MailboxKind::Inbox,
+    });
+
+    // Drafts
+    result.push(MailboxInfo {
+        label: "Drafts".to_string(),
+        icon: "\u{f03eb}",  // 󰏫
+        dir: root.join(&drafts_local),
+        kind: MailboxKind::Drafts,
+    });
+
+    // Sent
+    let sent_local = mbs.sent.as_ref()
+        .and_then(|m| m.local.as_ref())
+        .cloned()
+        .unwrap_or_else(|| "sent".to_string());
+    result.push(MailboxInfo {
+        label: "Sent".to_string(),
+        icon: "\u{f046b}",  // 󰑫
+        dir: root.join(&sent_local),
+        kind: MailboxKind::Sent,
+    });
+
+    // Archive
+    let archive_local = mbs.archive.as_ref()
+        .and_then(|m| m.local.as_ref())
+        .cloned()
+        .unwrap_or_else(|| "archive".to_string());
+    result.push(MailboxInfo {
+        label: "Archive".to_string(),
+        icon: "\u{f013c}",  // 󰀼
+        dir: root.join(&archive_local),
+        kind: MailboxKind::Archive,
+    });
+
+    // Extra mailboxes
+    if let Some(extras) = &mbs.extra {
+        for extra in extras {
+            let server_name = extra.server.as_deref().unwrap_or("Extra");
+            let local = extra.local.as_deref().unwrap_or("extra");
+            result.push(MailboxInfo {
+                label: server_name.to_string(),
+                icon: "\u{f0247}",  // 󰉇
+                dir: root.join(local),
+                kind: MailboxKind::Extra,
+            });
+        }
     }
 
-    let env_keys = ["INBOX_DIR", "DRAFTS_DIR", "SENT_DIR", "ARCHIVE_DIR"];
-    let mut dirs: [Option<PathBuf>; 4] = [None, None, None, None];
+    result
+}
 
-    for (i, key) in env_keys.iter().enumerate() {
-        dirs[i] = std::env::var(key).ok().map(|s| {
-            let s = s.trim_matches('"').trim_matches('\'');
-            PathBuf::from(shellexpand::tilde(s).into_owned())
-        });
-    }
-
-    dirs
+/// Fallback mailboxes when config is missing.
+fn default_mailboxes() -> Vec<MailboxInfo> {
+    let root = expand_path("~/notes/email");
+    vec![
+        MailboxInfo { label: "Inbox".to_string(), icon: "\u{f0172}", dir: root.join("inbox"), kind: MailboxKind::Inbox },
+        MailboxInfo { label: "Drafts".to_string(), icon: "\u{f03eb}", dir: root.join("drafts"), kind: MailboxKind::Drafts },
+        MailboxInfo { label: "Sent".to_string(), icon: "\u{f046b}", dir: root.join("sent"), kind: MailboxKind::Sent },
+        MailboxInfo { label: "Archive".to_string(), icon: "\u{f013c}", dir: root.join("archive"), kind: MailboxKind::Archive },
+    ]
 }
 
 /// Count .md files in each mailbox directory.
-fn count_emails(dirs: &[Option<PathBuf>; 4]) -> [usize; 4] {
-    let mut counts = [0usize; 4];
-    for (i, dir) in dirs.iter().enumerate() {
-        if let Some(path) = dir {
-            if path.is_dir() {
-                counts[i] = walkdir::WalkDir::new(path)
-                    .max_depth(1)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| {
-                        e.file_type().is_file()
-                            && e.path().extension().is_some_and(|ext| ext == "md")
-                    })
-                    .count();
-            }
+fn count_all_emails(mailboxes: &[MailboxInfo]) -> Vec<usize> {
+    mailboxes.iter().map(|mb| {
+        if mb.dir.is_dir() {
+            walkdir::WalkDir::new(&mb.dir)
+                .max_depth(1)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_type().is_file()
+                        && e.path().extension().is_some_and(|ext| ext == "md")
+                })
+                .count()
+        } else {
+            0
         }
-    }
-    counts
+    }).collect()
 }

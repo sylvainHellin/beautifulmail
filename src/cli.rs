@@ -62,7 +62,7 @@ pub fn approve(path: &Path) -> Result<String> {
 /// Run `email send <file>` (captures output).
 pub fn send(path: &Path) -> Result<String> {
     let output = Command::new("email")
-        .arg("send")
+        .args(["send", "-y"])
         .arg(path)
         .env("NO_COLOR", "1")
         .output()
@@ -78,7 +78,7 @@ pub fn send(path: &Path) -> Result<String> {
 /// Run `email send-approved [dir]` (captures output).
 pub fn send_approved(dir: &Path) -> Result<String> {
     let output = Command::new("email")
-        .arg("send-approved")
+        .args(["send-approved", "-y"])
         .arg(dir)
         .env("NO_COLOR", "1")
         .output()

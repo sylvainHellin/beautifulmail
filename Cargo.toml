@@ -1,6 +1,6 @@
 [package]
 name = "beautifulmail"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A polished TUI for the email CLI"
 authors = ["Sylvain Hellin"]
@@ -19,5 +19,5 @@ gray_matter = "0.2"
 chrono = "0.4"
 walkdir = "2.4"
 arboard = "3"
-dotenvy = "0.15"
+toml = "0.8"
 shellexpand = "3"

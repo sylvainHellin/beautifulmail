@@ -16,7 +16,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::{Action, App, Mailbox};
+use app::{Action, App, MailboxKind};
 
 enum WatchEvent {
     Changed,
@@ -116,7 +116,9 @@ fn handle_action(
                             Ok(()) => app.set_status("Reply draft ready".to_string()),
                             Err(e) => app.set_status(format!("Editor failed: {e}")),
                         }
-                        app.invalidate_cache(Mailbox::Drafts);
+                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
+                            app.invalidate_cache_idx(idx);
+                        }
                     }
                     Err(e) => app.set_status(format!("Reply failed: {e}")),
                 }
@@ -142,8 +144,7 @@ fn handle_action(
         }
 
         Action::SendApproved => {
-            if let Some(dir) = &app.mailbox_dirs[app.active_mailbox.index()] {
-                let dir = dir.clone();
+            if let Some(dir) = app.active_dir().cloned() {
                 match cli::send_approved(&dir) {
                     Ok(msg) => {
                         app.set_status(if msg.is_empty() {
@@ -164,7 +165,9 @@ fn handle_action(
             match cli::new_draft(&name) {
                 Ok(msg) => {
                     // Try to open the new draft in the editor
-                    if let Some(drafts_dir) = &app.mailbox_dirs[Mailbox::Drafts.index()] {
+                    let drafts_dir = app.find_mailbox_by_kind(MailboxKind::Drafts)
+                        .map(|i| app.mailboxes[i].dir.clone());
+                    if let Some(drafts_dir) = &drafts_dir {
                         let draft_path = drafts_dir.join(format!("{name}.md"));
                         if draft_path.exists() {
                             suspend_terminal(terminal)?;
@@ -173,7 +176,9 @@ fn handle_action(
                         }
                     }
                     app.set_status(msg);
-                    app.invalidate_cache(Mailbox::Drafts);
+                    if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
+                        app.invalidate_cache_idx(idx);
+                    }
                     app.reload_current_mailbox();
                 }
                 Err(e) => app.set_status(format!("New draft failed: {e}")),
@@ -201,7 +206,9 @@ fn handle_action(
                         } else {
                             msg
                         });
-                        app.invalidate_cache(Mailbox::Archive);
+                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Archive) {
+                            app.invalidate_cache_idx(idx);
+                        }
                         app.reload_current_mailbox();
                     }
                     Err(e) => app.set_status(format!("Archive failed: {e}")),

@@ -6,7 +6,7 @@ use gray_matter::engine::YAML;
 use gray_matter::Matter;
 use serde::Deserialize;
 
-use crate::app::Mailbox;
+use crate::app::MailboxKind;
 
 /// Parsed email entry for display in the list and preview.
 #[derive(Debug, Clone)]
@@ -25,12 +25,12 @@ pub struct EmailEntry {
 }
 
 impl EmailEntry {
-    /// The contact to display depends on the mailbox:
-    /// Inbox/Archive show `from`, Drafts/Sent show `to`.
-    pub fn display_contact(&self, mailbox: Mailbox) -> &str {
-        match mailbox {
-            Mailbox::Inbox | Mailbox::Archive => &self.from,
-            Mailbox::Drafts | Mailbox::Sent => &self.to,
+    /// The contact to display depends on the mailbox kind:
+    /// Inbox/Archive/Extra show `from`, Drafts/Sent show `to`.
+    pub fn display_contact(&self, kind: MailboxKind) -> &str {
+        match kind {
+            MailboxKind::Inbox | MailboxKind::Archive | MailboxKind::Extra => &self.from,
+            MailboxKind::Drafts | MailboxKind::Sent => &self.to,
         }
     }
 }

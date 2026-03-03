@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Focus, Mailbox};
+use crate::app::{App, Focus};
 use crate::theme;
 
 /// Render the entire UI from the current app state.
@@ -37,22 +37,23 @@ pub fn view(app: &App, frame: &mut Frame) {
         let right_col = columns[1];
 
         // Left column: sidebar (compact) + email list
+        let sidebar_height = (app.mailboxes.len() as u16) + 3; // mailboxes + border
         let left_panels = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(7), // sidebar: 4 mailboxes + border
-                Constraint::Min(0),    // email list fills rest
+                Constraint::Length(sidebar_height),
+                Constraint::Min(0),
             ])
             .split(left_col);
 
         render_sidebar(app, frame, left_panels[0]);
         render_email_list(app, frame, left_panels[1]);
 
-        // Right column: headers (fixed 6 lines, matching sidebar) + body
+        // Right column: headers (matching sidebar height) + body
         let right_panels = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(7),
+                Constraint::Length(sidebar_height),
                 Constraint::Min(0),
             ])
             .split(right_col);
@@ -61,10 +62,11 @@ pub fn view(app: &App, frame: &mut Frame) {
         render_body(app, frame, right_panels[1]);
     } else if show_sidebar {
         // Stacked: sidebar + email list (no right column)
+        let sidebar_height = (app.mailboxes.len() as u16) + 2;
         let left_panels = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(6),
+                Constraint::Length(sidebar_height),
                 Constraint::Min(0),
             ])
             .split(main_area);
@@ -105,18 +107,18 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
 
-    for (i, mailbox) in Mailbox::ALL.iter().enumerate() {
-        let is_selected = *mailbox == app.active_mailbox;
+    for (i, mb) in app.mailboxes.iter().enumerate() {
+        let is_selected = i == app.active_mailbox;
         let is_highlighted = app.focus == Focus::Sidebar && i == app.sidebar_index;
-        let count = app.mailbox_counts[i];
+        let count = app.mailbox_counts.get(i).copied().unwrap_or(0);
 
         let marker = if is_selected { ">" } else { " " };
 
         let label = format!(
             "{} {} {} {:>2}",
             marker,
-            mailbox.icon(),
-            mailbox.label(),
+            mb.icon,
+            mb.label,
             count
         );
 
@@ -142,12 +144,12 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
     let border_style = pane_border_style(app.focus, Focus::List);
     let title = if !app.search_query.is_empty() && app.focus != Focus::Search {
         if app.search_includes_body {
-            format!(" {} (content search) ", app.active_mailbox.label())
+            format!(" {} (content search) ", app.active_label())
         } else {
-            format!(" {} (filtered) ", app.active_mailbox.label())
+            format!(" {} (filtered) ", app.active_label())
         }
     } else {
-        format!(" {} ", app.active_mailbox.label())
+        format!(" {} ", app.active_label())
     };
     let block = Block::default()
         .title(title)
@@ -193,7 +195,7 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
         } else {
             format!(
                 "\n  No emails in {}\n\n  Press f to fetch new emails",
-                app.active_mailbox.label()
+                app.active_label()
             )
         };
         let empty =
@@ -228,7 +230,7 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
             .map(|(i, email)| {
                 let is_selected = i == app.list_index;
                 let contact = truncate(
-                    email.display_contact(app.active_mailbox),
+                    email.display_contact(app.active_kind()),
                     contact_width,
                 );
                 let subject = truncate(&email.subject, subject_width);
@@ -540,13 +542,13 @@ fn word_wrap(text: &str, width: usize) -> Vec<String> {
 /// Render the status bar at the bottom.
 fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     // Right side: optional WATCHING indicator + mailbox name + count
-    let total = app.mailbox_counts[app.active_mailbox.index()];
+    let total = app.mailbox_counts[app.active_mailbox];
     let shown = app.emails.len();
     let watch_prefix = if app.watcher_active { "WATCHING " } else { "" };
     let mailbox_text = if !app.search_query.is_empty() && shown != total {
-        format!("{} {}/{} ", app.active_mailbox.label(), shown, total)
+        format!("{} {}/{} ", app.active_label(), shown, total)
     } else {
-        format!("{} {} ", app.active_mailbox.label(), total)
+        format!("{} {} ", app.active_label(), total)
     };
     let right_len = (watch_prefix.len() + mailbox_text.len() + 1) as u16;
 
@@ -786,7 +788,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let lines = vec![
         section("GLOBAL"),
         entry("q", "Quit"),
-        entry("1/2/3/4", "Jump to mailbox"),
+        entry("1-9", "Jump to mailbox"),
         entry("s", "Focus sidebar"),
         entry("Tab", "Cycle focus forward"),
         entry("Shift+Tab", "Cycle focus backward"),
