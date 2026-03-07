@@ -1,7 +1,9 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap,
+};
 use ratatui::Frame;
 
 use crate::app::{App, Focus};
@@ -27,10 +29,7 @@ pub fn view(app: &App, frame: &mut Frame) {
         // Two-column layout: left (sidebar + list) | right (headers + body)
         let columns = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(35),
-                Constraint::Percentage(65),
-            ])
+            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
             .split(main_area);
 
         let left_col = columns[0];
@@ -40,10 +39,7 @@ pub fn view(app: &App, frame: &mut Frame) {
         let sidebar_height = (app.mailboxes.len() as u16) + 3; // mailboxes + border
         let left_panels = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(sidebar_height),
-                Constraint::Min(0),
-            ])
+            .constraints([Constraint::Length(sidebar_height), Constraint::Min(0)])
             .split(left_col);
 
         render_sidebar(app, frame, left_panels[0]);
@@ -52,10 +48,7 @@ pub fn view(app: &App, frame: &mut Frame) {
         // Right column: headers (matching sidebar height) + body
         let right_panels = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(sidebar_height),
-                Constraint::Min(0),
-            ])
+            .constraints([Constraint::Length(sidebar_height), Constraint::Min(0)])
             .split(right_col);
 
         render_headers(app, frame, right_panels[0]);
@@ -65,10 +58,7 @@ pub fn view(app: &App, frame: &mut Frame) {
         let sidebar_height = (app.mailboxes.len() as u16) + 2;
         let left_panels = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(sidebar_height),
-                Constraint::Min(0),
-            ])
+            .constraints([Constraint::Length(sidebar_height), Constraint::Min(0)])
             .split(main_area);
 
         render_sidebar(app, frame, left_panels[0]);
@@ -114,13 +104,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
 
         let marker = if is_selected { ">" } else { " " };
 
-        let label = format!(
-            "{} {} {} {:>2}",
-            marker,
-            mb.icon,
-            mb.label,
-            count
-        );
+        let label = format!("{} {} {} {:>2}", marker, mb.icon, mb.label, count);
 
         let style = if is_highlighted {
             Style::default()
@@ -181,10 +165,7 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled(app.search_query.as_str(), Style::default().fg(theme::TEXT)),
         ];
         if app.focus == Focus::Search {
-            spans.push(Span::styled(
-                "\u{2588}",
-                Style::default().fg(theme::BLUE),
-            ));
+            spans.push(Span::styled("\u{2588}", Style::default().fg(theme::BLUE)));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), search_rect);
     }
@@ -198,8 +179,7 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                 app.active_label()
             )
         };
-        let empty =
-            Paragraph::new(msg).style(Style::default().fg(theme::SUBTEXT0));
+        let empty = Paragraph::new(msg).style(Style::default().fg(theme::SUBTEXT0));
         frame.render_widget(empty, list_area);
         return;
     }
@@ -211,10 +191,8 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
 
     if available_width > 45 {
         // 3 columns: DATE + CONTACT + SUBJECT
-        let contact_width =
-            15.min(available_width.saturating_sub(date_width + spacing + 10));
-        let subject_width =
-            available_width.saturating_sub(date_width + contact_width + spacing);
+        let contact_width = 15.min(available_width.saturating_sub(date_width + spacing + 10));
+        let subject_width = available_width.saturating_sub(date_width + contact_width + spacing);
 
         let header = Row::new(vec![
             Cell::from("DATE").style(Style::default().fg(theme::SUBTEXT0)),
@@ -229,10 +207,7 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
             .enumerate()
             .map(|(i, email)| {
                 let is_selected = i == app.list_index;
-                let contact = truncate(
-                    email.display_contact(app.active_kind()),
-                    contact_width,
-                );
+                let contact = truncate(email.display_contact(app.active_kind()), contact_width);
                 let subject = truncate(&email.subject, subject_width);
 
                 let row_style = if is_selected {
@@ -350,8 +325,7 @@ fn render_headers(app: &App, frame: &mut Frame, area: Rect) {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         frame.render_widget(
-            Paragraph::new("  No email selected")
-                .style(Style::default().fg(theme::SUBTEXT0)),
+            Paragraph::new("  No email selected").style(Style::default().fg(theme::SUBTEXT0)),
             inner,
         );
         return;
@@ -426,9 +400,227 @@ fn parse_quote_depth(line: &str) -> (usize, &str) {
     (depth, &trimmed[pos..])
 }
 
+/// Parse inline markdown in a text string, returning styled spans.
+///
+/// Handles: **bold**, *italic*, `code`, [text](url)
+/// The `base_style` is the default style for plain text; markdown
+/// formatting is layered on top.
+fn parse_inline_markdown(text: &str, base_style: Style) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    let mut plain = String::new();
+
+    while i < len {
+        // **bold**
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            if let Some(end) = find_closing(&chars, i + 2, &['*', '*']) {
+                if !plain.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut plain), base_style));
+                }
+                let inner: String = chars[i + 2..end].iter().collect();
+                spans.push(Span::styled(inner, base_style.add_modifier(Modifier::BOLD)));
+                i = end + 2;
+                continue;
+            }
+        }
+
+        // *italic* (but not **)
+        if chars[i] == '*' && (i + 1 >= len || chars[i + 1] != '*') {
+            if let Some(end) = find_closing_single(&chars, i + 1, '*') {
+                if !plain.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut plain), base_style));
+                }
+                let inner: String = chars[i + 1..end].iter().collect();
+                spans.push(Span::styled(
+                    inner,
+                    base_style.add_modifier(Modifier::ITALIC),
+                ));
+                i = end + 1;
+                continue;
+            }
+        }
+
+        // `code`
+        if chars[i] == '`' {
+            if let Some(end) = find_closing_single(&chars, i + 1, '`') {
+                if !plain.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut plain), base_style));
+                }
+                let inner: String = chars[i + 1..end].iter().collect();
+                spans.push(Span::styled(
+                    inner,
+                    Style::default().fg(theme::PEACH).bg(theme::SURFACE0),
+                ));
+                i = end + 1;
+                continue;
+            }
+        }
+
+        // [text](url)
+        if chars[i] == '[' {
+            if let Some((link_text, end)) = parse_markdown_link(&chars, i) {
+                if !plain.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut plain), base_style));
+                }
+                spans.push(Span::styled(
+                    link_text,
+                    Style::default()
+                        .fg(theme::BLUE)
+                        .add_modifier(Modifier::UNDERLINED),
+                ));
+                i = end;
+                continue;
+            }
+        }
+
+        plain.push(chars[i]);
+        i += 1;
+    }
+
+    if !plain.is_empty() {
+        spans.push(Span::styled(plain, base_style));
+    }
+
+    // Never return empty -- at minimum return a blank span
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), base_style));
+    }
+
+    spans
+}
+
+/// Find the position of a two-character closing delimiter (e.g., **) starting from `start`.
+fn find_closing(chars: &[char], start: usize, delim: &[char; 2]) -> Option<usize> {
+    let len = chars.len();
+    let mut i = start;
+    while i + 1 < len {
+        if chars[i] == delim[0] && chars[i + 1] == delim[1] {
+            // Don't match empty content
+            if i > start {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Find the position of a single-character closing delimiter (e.g., * or `) starting from `start`.
+fn find_closing_single(chars: &[char], start: usize, delim: char) -> Option<usize> {
+    (start..chars.len()).find(|&i| chars[i] == delim && i > start)
+}
+
+/// Parse a markdown link `[text](url)` starting at position `start` (which points to `[`).
+/// Returns the display text and the position after the closing `)`.
+fn parse_markdown_link(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let len = chars.len();
+    // Find closing ]
+    let mut i = start + 1;
+    while i < len && chars[i] != ']' {
+        i += 1;
+    }
+    if i >= len {
+        return None;
+    }
+    let text: String = chars[start + 1..i].iter().collect();
+    // Expect ( immediately after ]
+    i += 1;
+    if i >= len || chars[i] != '(' {
+        return None;
+    }
+    // Find closing )
+    let paren_start = i + 1;
+    while i < len && chars[i] != ')' {
+        i += 1;
+    }
+    if i >= len {
+        return None;
+    }
+    // Only return if there's actual text
+    if text.is_empty() {
+        return None;
+    }
+    let _url: String = chars[paren_start..i].iter().collect();
+    Some((text, i + 1))
+}
+
+/// Detect if a line is a markdown heading. Returns (level, content) or None.
+fn parse_heading(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start();
+    let mut level = 0;
+    for ch in trimmed.chars() {
+        if ch == '#' {
+            level += 1;
+        } else {
+            break;
+        }
+    }
+    if level > 0 && level <= 6 {
+        let rest = trimmed[level..].trim_start();
+        if !rest.is_empty() || trimmed.len() > level {
+            return Some((level, rest));
+        }
+    }
+    None
+}
+
+/// Detect if a line is a horizontal rule (---, ***, ___).
+fn is_horizontal_rule(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.len() < 3 {
+        return false;
+    }
+    let ch = trimmed.chars().next().unwrap();
+    if ch == '-' || ch == '*' || ch == '_' {
+        return trimmed.chars().all(|c| c == ch || c == ' ');
+    }
+    false
+}
+
+/// Detect if a line is a list item. Returns (indent_prefix, content) or None.
+/// Handles: - item, * item, + item, 1. item, 2. item, etc.
+fn parse_list_item(line: &str) -> Option<(String, &str)> {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    let pad: String = " ".repeat(indent);
+
+    // Unordered: - item, * item, + item
+    if trimmed.len() >= 2 {
+        let first = trimmed.as_bytes()[0];
+        if (first == b'-' || first == b'+') && trimmed.as_bytes()[1] == b' ' {
+            return Some((format!("{}\u{2022} ", pad), &trimmed[2..]));
+        }
+        // Skip * to avoid conflict with italic/bold
+    }
+
+    // Ordered: 1. item, 12. item, etc.
+    let mut num_end = 0;
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() {
+            num_end += 1;
+        } else {
+            break;
+        }
+    }
+    if num_end > 0 && trimmed.len() > num_end + 1 {
+        let rest = &trimmed[num_end..];
+        if let Some(stripped) = rest.strip_prefix(". ") {
+            let number = &trimmed[..num_end];
+            return Some((format!("{}{}. ", pad, number), stripped));
+        }
+    }
+
+    None
+}
+
 /// Wrap body text manually, preserving quote prefixes on continuation lines.
+/// Renders inline markdown (bold, italic, code, links) and block-level
+/// elements (headings, horizontal rules, list items).
 fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
     let mut result: Vec<Line> = Vec::new();
+    let mut in_code_block = false;
 
     for line in body.lines() {
         // Signature placeholder
@@ -440,19 +632,100 @@ fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
             continue;
         }
 
+        // Fenced code block toggle (``` or ~~~)
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code_block = !in_code_block;
+            // Render the fence line itself dimmed
+            result.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(theme::OVERLAY0),
+            )));
+            continue;
+        }
+
+        // Inside a code block: render as-is with code styling
+        if in_code_block {
+            result.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(theme::PEACH).bg(theme::SURFACE0),
+            )));
+            continue;
+        }
+
         let (depth, content) = parse_quote_depth(line);
 
         if depth == 0 {
-            // Regular or attribution line -- simple word wrap
-            let style = if is_attribution(line.trim()) {
-                Style::default()
+            // --- Block-level markdown elements (only outside quotes) ---
+
+            // Horizontal rule
+            if is_horizontal_rule(content) {
+                let rule: String = "\u{2500}".repeat(width.min(40));
+                result.push(Line::from(Span::styled(
+                    rule,
+                    Style::default().fg(theme::OVERLAY0),
+                )));
+                continue;
+            }
+
+            // Heading
+            if let Some((level, heading_text)) = parse_heading(content) {
+                let style = match level {
+                    1 => Style::default()
+                        .fg(theme::MAUVE)
+                        .add_modifier(Modifier::BOLD),
+                    2 => Style::default()
+                        .fg(theme::BLUE)
+                        .add_modifier(Modifier::BOLD),
+                    _ => Style::default()
+                        .fg(theme::TEAL)
+                        .add_modifier(Modifier::BOLD),
+                };
+                for wrapped in word_wrap(heading_text, width) {
+                    result.push(Line::from(parse_inline_markdown(&wrapped, style)));
+                }
+                continue;
+            }
+
+            // List item
+            if let Some((prefix, item_content)) = parse_list_item(content) {
+                let prefix_width = prefix.chars().count();
+                let text_width = width.saturating_sub(prefix_width);
+                let base_style = Style::default().fg(theme::TEXT);
+                if text_width < 5 {
+                    let mut spans = vec![Span::styled(prefix, Style::default().fg(theme::BLUE))];
+                    spans.extend(parse_inline_markdown(item_content, base_style));
+                    result.push(Line::from(spans));
+                } else {
+                    let wrapped_lines = word_wrap(item_content, text_width);
+                    for (i, wrapped) in wrapped_lines.iter().enumerate() {
+                        let line_prefix = if i == 0 {
+                            prefix.clone()
+                        } else {
+                            " ".repeat(prefix_width)
+                        };
+                        let mut spans =
+                            vec![Span::styled(line_prefix, Style::default().fg(theme::BLUE))];
+                        spans.extend(parse_inline_markdown(wrapped, base_style));
+                        result.push(Line::from(spans));
+                    }
+                }
+                continue;
+            }
+
+            // Regular or attribution line -- word wrap with inline markdown
+            if is_attribution(content.trim()) {
+                let style = Style::default()
                     .fg(theme::SUBTEXT0)
-                    .add_modifier(Modifier::ITALIC)
+                    .add_modifier(Modifier::ITALIC);
+                for wrapped in word_wrap(content, width) {
+                    result.push(Line::from(Span::styled(wrapped, style)));
+                }
             } else {
-                Style::default().fg(theme::TEXT)
-            };
-            for wrapped in word_wrap(content, width) {
-                result.push(Line::from(Span::styled(wrapped, style)));
+                let base_style = Style::default().fg(theme::TEXT);
+                for wrapped in word_wrap(content, width) {
+                    result.push(Line::from(parse_inline_markdown(&wrapped, base_style)));
+                }
             }
         } else {
             // Quoted line -- wrap with prefix on every continuation
@@ -474,16 +747,25 @@ fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
 
             if text_width < 5 {
                 // Too narrow to wrap meaningfully
-                result.push(Line::from(vec![
-                    Span::styled(prefix, Style::default().fg(theme::BLUE)),
-                    Span::styled(content.to_string(), text_style),
-                ]));
+                let mut spans = vec![Span::styled(prefix, Style::default().fg(theme::BLUE))];
+                if is_attr {
+                    spans.push(Span::styled(content.to_string(), text_style));
+                } else {
+                    spans.extend(parse_inline_markdown(content, text_style));
+                }
+                result.push(Line::from(spans));
             } else {
                 for wrapped in word_wrap(content, text_width) {
-                    result.push(Line::from(vec![
-                        Span::styled(prefix.clone(), Style::default().fg(theme::BLUE)),
-                        Span::styled(wrapped, text_style),
-                    ]));
+                    let mut spans = vec![Span::styled(
+                        prefix.clone(),
+                        Style::default().fg(theme::BLUE),
+                    )];
+                    if is_attr {
+                        spans.push(Span::styled(wrapped, text_style));
+                    } else {
+                        spans.extend(parse_inline_markdown(&wrapped, text_style));
+                    }
+                    result.push(Line::from(spans));
                 }
             }
         }
@@ -558,7 +840,17 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         .split(area);
 
     // Left side: hints or status message
-    let left_content = if let Some(msg) = &app.status_message {
+    let left_content = if app.bg_count > 0 {
+        let frames = ['\u{280b}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}'];
+        let spinner = frames[app.bg_spin_tick % frames.len()];
+        let label = app.status_message.as_deref().unwrap_or("Working...");
+        let text = if app.bg_count > 1 {
+            format!(" {} {} ({} ops)", spinner, label, app.bg_count)
+        } else {
+            format!(" {} {}", spinner, label)
+        };
+        Line::from(Span::styled(text, Style::default().fg(theme::GREEN)))
+    } else if let Some(msg) = &app.status_message {
         Line::from(vec![
             Span::styled(" ", Style::default()),
             Span::styled(msg.as_str(), Style::default().fg(theme::GREEN)),
@@ -644,15 +936,9 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
 
     let mut right_spans = vec![Span::styled(" ", Style::default())];
     if app.watcher_active {
-        right_spans.push(Span::styled(
-            watch_prefix,
-            Style::default().fg(theme::TEAL),
-        ));
+        right_spans.push(Span::styled(watch_prefix, Style::default().fg(theme::TEAL)));
     }
-    right_spans.push(Span::styled(
-        mailbox_text,
-        Style::default().fg(theme::BLUE),
-    ));
+    right_spans.push(Span::styled(mailbox_text, Style::default().fg(theme::BLUE)));
     let right = Paragraph::new(Line::from(right_spans))
         .style(Style::default().bg(theme::SURFACE0))
         .alignment(Alignment::Right);
@@ -660,11 +946,7 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 /// Render a centered confirmation dialog overlay.
-fn render_confirm_dialog(
-    dialog: &crate::app::ConfirmDialog,
-    frame: &mut Frame,
-    area: Rect,
-) {
+fn render_confirm_dialog(dialog: &crate::app::ConfirmDialog, frame: &mut Frame, area: Rect) {
     // Size the dialog
     let dialog_width = 40u16.min(area.width.saturating_sub(4));
     let dialog_height = 7u16;
@@ -833,8 +1115,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
 
 /// Return border style based on whether this pane is focused.
 fn pane_border_style(current_focus: Focus, pane: Focus) -> Style {
-    let focused =
-        current_focus == pane || (current_focus == Focus::Search && pane == Focus::List);
+    let focused = current_focus == pane || (current_focus == Focus::Search && pane == Focus::List);
     if focused {
         Style::default().fg(theme::BLUE)
     } else {

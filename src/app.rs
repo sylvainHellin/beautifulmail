@@ -5,6 +5,18 @@ use serde::Deserialize;
 
 use crate::email::{self, EmailEntry};
 
+/// Result from a background CLI operation.
+#[derive(Debug)]
+pub enum BgResult {
+    Fetch { result: Result<String, String> },
+    Sync { result: Result<String, String> },
+    Reconcile { result: Result<String, String> },
+    Send { result: Result<String, String> },
+    SendApproved { result: Result<String, String> },
+    Archive { result: Result<String, String> },
+    Delete { result: Result<String, String> },
+}
+
 /// Which pane currently has focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -135,6 +147,15 @@ pub struct App {
     pub show_help: bool,
     /// Whether the background mail watcher is active.
     pub watcher_active: bool,
+
+    /// Total number of background operations in flight.
+    pub bg_count: usize,
+    /// Number of mutation operations in flight (archive/delete) -- blocks fetch/sync.
+    pub bg_mutations: usize,
+    /// Spinner tick counter (counts up while bg_count > 0).
+    pub bg_spin_tick: usize,
+    /// Queued action to execute after all mutations complete (fetch/sync/reconcile).
+    pub queued_action: Option<Action>,
 }
 
 impl App {
@@ -178,6 +199,10 @@ impl App {
             search_includes_body: false,
             show_help: false,
             watcher_active: false,
+            bg_count: 0,
+            bg_mutations: 0,
+            bg_spin_tick: 0,
+            queued_action: None,
         }
     }
 
@@ -233,6 +258,10 @@ impl App {
 
     /// Tick down the status message counter. Called when no event is received.
     pub fn tick_status(&mut self) {
+        if self.bg_count > 0 {
+            // Don't clear status while background ops are running
+            return;
+        }
         if self.status_ticks > 0 {
             self.status_ticks -= 1;
             if self.status_ticks == 0 {

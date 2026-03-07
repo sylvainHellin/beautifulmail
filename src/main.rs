@@ -16,7 +16,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::{Action, App, MailboxKind};
+use app::{Action, App, BgResult, MailboxKind};
 
 enum WatchEvent {
     Changed,
@@ -46,6 +46,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         watcher_loop(watch_tx);
     });
 
+    // Background task results channel
+    let (bg_tx, bg_rx) = mpsc::channel::<BgResult>();
+
     while app.running {
         terminal.draw(|frame| ui::view(&app, frame))?;
 
@@ -57,6 +60,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         } else {
             // No event this tick -- count down status message
             app.tick_status();
+            // Advance spinner when background ops are running
+            if app.bg_count > 0 {
+                app.bg_spin_tick = app.bg_spin_tick.wrapping_add(1);
+            }
         }
 
         // Check background watcher
@@ -77,9 +84,21 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             }
         }
 
+        // Check background task results (drain all available)
+        while let Ok(result) = bg_rx.try_recv() {
+            handle_bg_result(&mut app, result);
+        }
+
+        // Auto-execute queued action when all mutations complete
+        if app.bg_mutations == 0 {
+            if let Some(action) = app.queued_action.take() {
+                app.pending_action = Some(action);
+            }
+        }
+
         // Process pending action (side-effects outside the pure update)
         if let Some(action) = app.pending_action.take() {
-            handle_action(&mut app, terminal, action)?;
+            handle_action(&mut app, terminal, action, &bg_tx)?;
         }
     }
 
@@ -90,6 +109,7 @@ fn handle_action(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     action: Action,
+    bg_tx: &mpsc::Sender<BgResult>,
 ) -> Result<()> {
     match action {
         Action::EditCurrent => {
@@ -128,35 +148,29 @@ fn handle_action(
 
         Action::Send => {
             if let Some(path) = app.selected_email_path() {
-                match cli::send(&path) {
-                    Ok(msg) => {
-                        app.set_status(if msg.is_empty() {
-                            "Email sent".to_string()
-                        } else {
-                            msg
-                        });
-                        app.invalidate_all_caches();
-                    }
-                    Err(e) => app.set_status(format!("Send failed: {e}")),
-                }
-                app.reload_current_mailbox();
+                app.bg_count += 1;
+                app.set_status("Sending...".to_string());
+                let tx = bg_tx.clone();
+                std::thread::spawn(move || {
+                    let result = cli::send(&path);
+                    let _ = tx.send(BgResult::Send {
+                        result: result.map_err(|e| e.to_string()),
+                    });
+                });
             }
         }
 
         Action::SendApproved => {
             if let Some(dir) = app.active_dir().cloned() {
-                match cli::send_approved(&dir) {
-                    Ok(msg) => {
-                        app.set_status(if msg.is_empty() {
-                            "Approved emails sent".to_string()
-                        } else {
-                            msg
-                        });
-                        app.invalidate_all_caches();
-                    }
-                    Err(e) => app.set_status(format!("Send-approved failed: {e}")),
-                }
-                app.reload_current_mailbox();
+                app.bg_count += 1;
+                app.set_status("Sending approved...".to_string());
+                let tx = bg_tx.clone();
+                std::thread::spawn(move || {
+                    let result = cli::send_approved(&dir);
+                    let _ = tx.send(BgResult::SendApproved {
+                        result: result.map_err(|e| e.to_string()),
+                    });
+                });
             }
         }
 
@@ -199,36 +213,31 @@ fn handle_action(
 
         Action::Archive => {
             if let Some(path) = app.selected_email_path() {
-                match cli::archive(&path) {
-                    Ok(msg) => {
-                        app.set_status(if msg.is_empty() {
-                            "Email archived".to_string()
-                        } else {
-                            msg
-                        });
-                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Archive) {
-                            app.invalidate_cache_idx(idx);
-                        }
-                        app.reload_current_mailbox();
-                    }
-                    Err(e) => app.set_status(format!("Archive failed: {e}")),
-                }
+                app.bg_count += 1;
+                app.bg_mutations += 1;
+                app.set_status("Archiving...".to_string());
+                let tx = bg_tx.clone();
+                std::thread::spawn(move || {
+                    let result = cli::archive(&path);
+                    let _ = tx.send(BgResult::Archive {
+                        result: result.map_err(|e| e.to_string()),
+                    });
+                });
             }
         }
 
         Action::Delete => {
             if let Some(path) = app.selected_email_path() {
-                match cli::delete(&path) {
-                    Ok(msg) => {
-                        app.set_status(if msg.is_empty() {
-                            "Email deleted".to_string()
-                        } else {
-                            msg
-                        });
-                        app.reload_current_mailbox();
-                    }
-                    Err(e) => app.set_status(format!("Delete failed: {e}")),
-                }
+                app.bg_count += 1;
+                app.bg_mutations += 1;
+                app.set_status("Deleting...".to_string());
+                let tx = bg_tx.clone();
+                std::thread::spawn(move || {
+                    let result = cli::delete(&path);
+                    let _ = tx.send(BgResult::Delete {
+                        result: result.map_err(|e| e.to_string()),
+                    });
+                });
             }
         }
 
@@ -242,16 +251,130 @@ fn handle_action(
         }
 
         Action::Fetch => {
+            if app.bg_mutations > 0 {
+                app.queued_action = Some(Action::Fetch);
+                app.set_status(format!(
+                    "Fetch queued ({} ops pending...)",
+                    app.bg_mutations
+                ));
+                return Ok(());
+            }
+            app.bg_count += 1;
             app.set_status("Fetching...".to_string());
-            terminal.draw(|frame| ui::view(app, frame))?;
+            let tx = bg_tx.clone();
+            std::thread::spawn(move || {
+                let result = cli::fetch();
+                let _ = tx.send(BgResult::Fetch {
+                    result: result.map_err(|e| e.to_string()),
+                });
+            });
+        }
 
-            match cli::fetch() {
+        Action::Sync => {
+            if app.bg_mutations > 0 {
+                app.queued_action = Some(Action::Sync);
+                app.set_status(format!(
+                    "Sync queued ({} ops pending...)",
+                    app.bg_mutations
+                ));
+                return Ok(());
+            }
+            app.bg_count += 1;
+            app.set_status("Syncing...".to_string());
+            let tx = bg_tx.clone();
+            std::thread::spawn(move || {
+                let result = cli::sync();
+                let _ = tx.send(BgResult::Sync {
+                    result: result.map_err(|e| e.to_string()),
+                });
+            });
+        }
+
+        Action::Reconcile => {
+            if app.bg_mutations > 0 {
+                app.queued_action = Some(Action::Reconcile);
+                app.set_status(format!(
+                    "Reconcile queued ({} ops pending...)",
+                    app.bg_mutations
+                ));
+                return Ok(());
+            }
+            app.bg_count += 1;
+            app.set_status("Reconciling...".to_string());
+            let tx = bg_tx.clone();
+            std::thread::spawn(move || {
+                let result = cli::sync_reconcile();
+                let _ = tx.send(BgResult::Reconcile {
+                    result: result.map_err(|e| e.to_string()),
+                });
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_bg_result(app: &mut App, result: BgResult) {
+    app.bg_count = app.bg_count.saturating_sub(1);
+
+    match result {
+        BgResult::Archive { result } => {
+            app.bg_mutations = app.bg_mutations.saturating_sub(1);
+            match result {
                 Ok(msg) => {
-                    app.set_status(if msg.is_empty() {
-                        "Fetch complete".to_string()
-                    } else {
-                        msg
-                    });
+                    app.set_status(if msg.is_empty() { "Email archived".into() } else { msg });
+                    if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Archive) {
+                        app.invalidate_cache_idx(idx);
+                    }
+                    app.reload_current_mailbox();
+                }
+                Err(e) => {
+                    app.set_status(format!("Archive failed: {e}"));
+                    app.reload_current_mailbox();
+                }
+            }
+        }
+
+        BgResult::Delete { result } => {
+            app.bg_mutations = app.bg_mutations.saturating_sub(1);
+            match result {
+                Ok(msg) => {
+                    app.set_status(if msg.is_empty() { "Email deleted".into() } else { msg });
+                    app.reload_current_mailbox();
+                }
+                Err(e) => {
+                    app.set_status(format!("Delete failed: {e}"));
+                    app.reload_current_mailbox();
+                }
+            }
+        }
+
+        BgResult::Send { result } => {
+            match result {
+                Ok(msg) => {
+                    app.set_status(if msg.is_empty() { "Email sent".into() } else { msg });
+                    app.invalidate_all_caches();
+                    app.reload_current_mailbox();
+                }
+                Err(e) => app.set_status(format!("Send failed: {e}")),
+            }
+        }
+
+        BgResult::SendApproved { result } => {
+            match result {
+                Ok(msg) => {
+                    app.set_status(if msg.is_empty() { "Approved emails sent".into() } else { msg });
+                    app.invalidate_all_caches();
+                    app.reload_current_mailbox();
+                }
+                Err(e) => app.set_status(format!("Send-approved failed: {e}")),
+            }
+        }
+
+        BgResult::Fetch { result } => {
+            match result {
+                Ok(msg) => {
+                    app.set_status(if msg.is_empty() { "Fetch complete".into() } else { msg });
                     app.invalidate_all_caches();
                     app.reload_current_mailbox();
                 }
@@ -259,18 +382,10 @@ fn handle_action(
             }
         }
 
-        Action::Sync => {
-            app.set_status("Syncing...".to_string());
-            // Force a draw so the user sees the "Syncing..." message
-            terminal.draw(|frame| ui::view(app, frame))?;
-
-            match cli::sync() {
+        BgResult::Sync { result } => {
+            match result {
                 Ok(msg) => {
-                    app.set_status(if msg.is_empty() {
-                        "Sync complete".to_string()
-                    } else {
-                        msg
-                    });
+                    app.set_status(if msg.is_empty() { "Sync complete".into() } else { msg });
                     app.invalidate_all_caches();
                     app.reload_current_mailbox();
                 }
@@ -278,17 +393,10 @@ fn handle_action(
             }
         }
 
-        Action::Reconcile => {
-            app.set_status("Reconciling...".to_string());
-            terminal.draw(|frame| ui::view(app, frame))?;
-
-            match cli::sync_reconcile() {
+        BgResult::Reconcile { result } => {
+            match result {
                 Ok(msg) => {
-                    app.set_status(if msg.is_empty() {
-                        "Reconcile complete".to_string()
-                    } else {
-                        msg
-                    });
+                    app.set_status(if msg.is_empty() { "Reconcile complete".into() } else { msg });
                     app.invalidate_all_caches();
                     app.reload_current_mailbox();
                 }
@@ -296,8 +404,6 @@ fn handle_action(
             }
         }
     }
-
-    Ok(())
 }
 
 fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
