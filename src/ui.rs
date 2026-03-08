@@ -80,6 +80,11 @@ pub fn view(app: &App, frame: &mut Frame) {
     if app.show_help {
         render_help_overlay(frame, area);
     }
+
+    // Persistent error overlay (renders on top of everything)
+    if let Some(error) = &app.persistent_error {
+        render_persistent_error(error, frame, area);
+    }
 }
 
 /// Render the sidebar with mailbox list.
@@ -995,6 +1000,65 @@ fn render_confirm_dialog(dialog: &crate::app::ConfirmDialog, frame: &mut Frame, 
             Span::styled("o", Style::default().fg(theme::TEXT)),
         ]),
     ];
+
+    let content = Paragraph::new(lines).block(block);
+    frame.render_widget(content, dialog_area);
+}
+
+/// Render a persistent error overlay with sync/dismiss options.
+fn render_persistent_error(error: &crate::app::PersistentError, frame: &mut Frame, area: Rect) {
+    let dialog_width = 50u16.min(area.width.saturating_sub(4));
+    // Count lines in message for dynamic height
+    let msg_lines = error.message.lines().count() as u16;
+    // title + blank + msg lines + blank + buttons + top/bottom borders
+    let dialog_height = msg_lines + 6;
+    let inner_width = dialog_width.saturating_sub(4) as usize;
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(dialog_width)])
+        .flex(Flex::Center)
+        .split(area);
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(dialog_height)])
+        .flex(Flex::Center)
+        .split(horizontal[0]);
+
+    let dialog_area = vertical[0];
+    frame.render_widget(Clear, dialog_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::RED))
+        .style(Style::default().bg(theme::BASE));
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Error",
+            Style::default()
+                .fg(theme::RED)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    for msg_line in error.message.lines() {
+        lines.push(Line::from(Span::styled(
+            truncate(msg_line, inner_width),
+            Style::default().fg(theme::TEXT),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  [s]", Style::default().fg(theme::GREEN)),
+        Span::styled("ync now  ", Style::default().fg(theme::TEXT)),
+        Span::styled("[d]", Style::default().fg(theme::SUBTEXT0)),
+        Span::styled("ismiss", Style::default().fg(theme::TEXT)),
+    ]));
 
     let content = Paragraph::new(lines).block(block);
     frame.render_widget(content, dialog_area);

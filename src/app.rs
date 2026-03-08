@@ -102,6 +102,11 @@ pub struct ConfirmDialog {
     pub action: ConfirmAction,
 }
 
+/// Persistent error notification (requires user action to dismiss).
+pub struct PersistentError {
+    pub message: String,
+}
+
 /// Top-level application state.
 pub struct App {
     pub focus: Focus,
@@ -156,6 +161,8 @@ pub struct App {
     pub bg_spin_tick: usize,
     /// Queued action to execute after all mutations complete (fetch/sync/reconcile).
     pub queued_action: Option<Action>,
+    /// Persistent error notification (requires user action to dismiss).
+    pub persistent_error: Option<PersistentError>,
 }
 
 impl App {
@@ -203,6 +210,7 @@ impl App {
             bg_mutations: 0,
             bg_spin_tick: 0,
             queued_action: None,
+            persistent_error: None,
         }
     }
 
@@ -280,6 +288,43 @@ impl App {
         self.selected_email().map(|e| e.path.clone())
     }
 
+    /// Remove the currently selected email from the in-memory list (optimistic UI).
+    /// Does NOT touch the filesystem. Returns the removed email's path.
+    pub fn remove_selected_from_list(&mut self) -> Option<PathBuf> {
+        if self.emails.is_empty() {
+            return None;
+        }
+        let path = self.emails[self.list_index].path.clone();
+        self.emails.remove(self.list_index);
+
+        // Also remove from cache so reloads don't restore it
+        if let Some(Some(cached)) = self.email_cache.get_mut(self.active_mailbox) {
+            cached.retain(|e| e.path != path);
+        }
+
+        // Adjust selection
+        if !self.emails.is_empty() {
+            self.list_index = self.list_index.min(self.emails.len() - 1);
+        } else {
+            self.list_index = 0;
+        }
+
+        // Update count
+        if let Some(count) = self.mailbox_counts.get_mut(self.active_mailbox) {
+            *count = self.emails.len();
+        }
+
+        self.headers_scroll = 0;
+        self.preview_scroll = 0;
+
+        Some(path)
+    }
+
+    /// Set a persistent error that requires user action to dismiss.
+    pub fn set_persistent_error(&mut self, msg: String) {
+        self.persistent_error = Some(PersistentError { message: msg });
+    }
+
     /// Invalidate cache for a mailbox index so it reloads on next access.
     pub fn invalidate_cache_idx(&mut self, idx: usize) {
         if let Some(slot) = self.email_cache.get_mut(idx) {
@@ -342,6 +387,11 @@ impl App {
         // If a confirmation dialog is open, handle it exclusively
         if self.confirm_dialog.is_some() {
             return self.handle_confirm_key(key);
+        }
+
+        // If persistent error overlay is showing, handle it exclusively
+        if self.persistent_error.is_some() {
+            return self.handle_persistent_error_key(key);
         }
 
         // If help overlay is showing, handle it exclusively
@@ -653,6 +703,20 @@ impl App {
         match key.code {
             KeyCode::Char('?') | KeyCode::Esc => {
                 self.show_help = false;
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_persistent_error_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match key.code {
+            KeyCode::Char('s') => {
+                self.persistent_error = None;
+                self.pending_action = Some(Action::Sync);
+            }
+            KeyCode::Char('d') | KeyCode::Esc => {
+                self.persistent_error = None;
             }
             _ => {}
         }

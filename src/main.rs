@@ -213,9 +213,13 @@ fn handle_action(
 
         Action::Archive => {
             if let Some(path) = app.selected_email_path() {
+                // Optimistic UI: remove from list immediately
+                app.remove_selected_from_list();
                 app.bg_count += 1;
                 app.bg_mutations += 1;
                 app.set_status("Archiving...".to_string());
+                // Force immediate redraw so the removal is visible
+                terminal.draw(|frame| ui::view(app, frame))?;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
                     let result = cli::archive(&path);
@@ -228,9 +232,13 @@ fn handle_action(
 
         Action::Delete => {
             if let Some(path) = app.selected_email_path() {
+                // Optimistic UI: remove from list immediately
+                app.remove_selected_from_list();
                 app.bg_count += 1;
                 app.bg_mutations += 1;
                 app.set_status("Deleting...".to_string());
+                // Force immediate redraw so the removal is visible
+                terminal.draw(|frame| ui::view(app, frame))?;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
                     let result = cli::delete(&path);
@@ -326,11 +334,15 @@ fn handle_bg_result(app: &mut App, result: BgResult) {
                     if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Archive) {
                         app.invalidate_cache_idx(idx);
                     }
-                    app.reload_current_mailbox();
                 }
                 Err(e) => {
-                    app.set_status(format!("Archive failed: {e}"));
+                    // CLI has already rolled back local changes.
+                    // Reload from disk to restore the email in the list.
+                    app.invalidate_all_caches();
                     app.reload_current_mailbox();
+                    app.set_persistent_error(format!(
+                        "Archive failed: {e}\nEmail restored to inbox. Sync to retry?"
+                    ));
                 }
             }
         }
@@ -340,11 +352,15 @@ fn handle_bg_result(app: &mut App, result: BgResult) {
             match result {
                 Ok(msg) => {
                     app.set_status(if msg.is_empty() { "Email deleted".into() } else { msg });
-                    app.reload_current_mailbox();
                 }
                 Err(e) => {
-                    app.set_status(format!("Delete failed: {e}"));
+                    // CLI has already restored local files.
+                    // Reload from disk to restore the email in the list.
+                    app.invalidate_all_caches();
                     app.reload_current_mailbox();
+                    app.set_persistent_error(format!(
+                        "Delete failed: {e}\nEmail restored. Sync to retry?"
+                    ));
                 }
             }
         }
